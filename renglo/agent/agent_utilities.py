@@ -973,8 +973,6 @@ class AgentUtilities:
             return False
 
         if len(workspaces_list['items']) == 0:
-            return False
-
             # Create a workspace as none exist
             payload = {}
             response = self.CHC.create_workspace(
@@ -1768,10 +1766,12 @@ class AgentUtilities:
             prompt = {
                     "model": self.AI_1_MODEL,
                     "messages": messages,
-                    "tools": available_tools,
                     "temperature":0,
-                    "tool_choice": "auto"
                 }
+
+            if available_tools:
+                prompt["tools"] = available_tools
+                prompt["tool_choice"] = "auto"
 
             prompt = self.sanitize(prompt)
             #print(f'RAW PROMPT >> {prompt}')
