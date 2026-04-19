@@ -262,6 +262,12 @@ class AgentUtilities:
                 self.update_chat_message_document(doc)
                 self.print_chat(doc, message_type, as_is=True)
 
+            elif msg_type == 'internal' and output.get('role') == 'assistant':
+                _logger_workspace.debug("save_chat | type=internal")
+                message_type = 'internal'
+                doc = {'_out': self.sanitize(output), '_type': message_type, '_next': next}
+                self.update_chat_message_document(doc)
+
             elif msg_type == 'json' and output.get('role') == 'assistant':
                 message_type = 'json'
                 out_val = output.get('content') if 'content' in output else output
@@ -281,7 +287,13 @@ class AgentUtilities:
                 _logger_workspace.debug("save_chat | type=tool_rq")
                 # This is a tool call
                 message_type = 'tool_rq'
-                doc = {'_out': self.sanitize(output), '_type': 'tool_rq','_next': next}
+                tool_rq_out = dict(output)
+                tc_raw = tool_rq_out.get('content')
+                if tc_raw is None or (
+                    isinstance(tc_raw, str) and tc_raw.strip() in ('None', 'null')
+                ):
+                    tool_rq_out['content'] = ''
+                doc = {'_out': self.sanitize(tool_rq_out), '_type': 'tool_rq','_next': next}
                 # Memorize to permanent storage
                 self.update_chat_message_document(doc)
 
@@ -679,6 +691,10 @@ class AgentUtilities:
                             if 'updated_at' in output:
                                 workspace['state_machine'][plan_id] = output['updated_at']
 
+                if key == 'completion_router':
+                    if isinstance(output, dict):
+                        workspace['completion_router'] = self.sanitize(output)
+
                 if key == 'action_log':
                     if isinstance(output, dict):
                         '''
@@ -765,6 +781,8 @@ class AgentUtilities:
                 params['tools'] = prompt['tools']
             if 'tool_choice' in prompt:
                 params['tool_choice'] = prompt['tool_choice']
+            if 'parallel_tool_calls' in prompt:
+                params['parallel_tool_calls'] = prompt['parallel_tool_calls']
             if 'response_format' in prompt:
                 params['response_format'] = prompt['response_format']
 
@@ -1333,6 +1351,14 @@ class AgentUtilities:
         if has_content and not isinstance(response['content'], str):
             return {"success": False, "action": action, "input": response, "output": "Content must be a string"}
 
+        # Never persist str(None); some SDK paths leave content unset next to tool_calls.
+        if response.get("role") == "assistant":
+            c_raw = response.get("content")
+            if c_raw is None or (
+                isinstance(c_raw, str) and c_raw.strip() in ("None", "null")
+            ):
+                response["content"] = ""
+
         return {"success": True, "action": action, "output": response}
 
     def clear_tool_message_content(self, message_list, recent_tool_messages=1):
@@ -1356,25 +1382,26 @@ class AgentUtilities:
                 if len(tool_indices) >= recent_tool_messages:
                     break
 
-        # Clear content from all tool messages except the last x ones
+        # Only mutate tool-role messages. Assistant/user must keep content as returned by the API
+        # (otherwise None becomes str(None) == "None" and poisons the next LLM call).
         for i, message in enumerate(message_list):
-            if message.get('role') == 'tool' and i not in tool_indices:
-                # Actually clear the content (set to empty string)
+            if message.get('role') != 'tool':
+                continue
+            if i not in tool_indices:
                 message['content'] = ""
+                continue
+            # Convert complex tool payload to string for OpenAI API
+            if isinstance(message.get('content'), list):
+                sanitized_content = self.sanitize(message['content'])
+                message['content'] = json.dumps(sanitized_content)
+            elif isinstance(message.get('content'), dict):
+                sanitized_content = self.sanitize(message['content'])
+                message['content'] = json.dumps(sanitized_content)
             else:
-                # Convert complex content to string format for OpenAI API
-                if isinstance(message.get('content'), list):
-                    # If content is an array, sanitize and convert it to a JSON string
-                    sanitized_content = self.sanitize(message['content'])
-                    message['content'] = json.dumps(sanitized_content)
-                elif isinstance(message.get('content'), dict):
-                    # If content is an object, sanitize and convert it to a JSON string
-                    sanitized_content = self.sanitize(message['content'])
-                    message['content'] = json.dumps(sanitized_content)
-                else:
-                    # If content is already a string or other type, sanitize and convert to string
-                    sanitized_content = self.sanitize(message.get('content', ''))
-                    message['content'] = str(sanitized_content)
+                sanitized_content = self.sanitize(message.get('content', ''))
+                message['content'] = (
+                    "" if sanitized_content is None else str(sanitized_content)
+                )
 
         #print(f'Cleared tool message content: {message_list}') (verbose)
 
