@@ -81,12 +81,14 @@ class AgentUtilities:
         websocket_url = self.config.get('WEBSOCKET_CONNECTIONS', '')
         self.ws_client = WebSocketClient(websocket_url)
 
-    def get_message_history(self,filter={}):
+    def get_message_history(self,filter={}, include_internal=False):
         """
         Get the message history for the current thread.
         filter:{'param':<name>,'begins_with':<value>}
             param: The name of the parameter you are applying the filter: ['_interface','_next','_type']
             value: The begins at string for the value of the parameter to be filtered
+        include_internal: When True, also emit msg_type='internal' messages (ReAct scratchpad)
+            so the LLM can re-read its own prior reasoning.
 
         Returns:
             dict: Success status and message list
@@ -142,7 +144,15 @@ class AgentUtilities:
                         _logger_workspace.debug("message_filter_include | param=%s | value=%s", filter_param, param_value)
 
                     out_message = m['_out']
-                    if m['_type'] in ['user', 'consent', 'system', 'text', 'tool_rq', 'tool_rs']:  # OK to show to LLM
+                    allowed_types = ['user', 'consent', 'system', 'text', 'tool_rq', 'tool_rs']
+                    if include_internal:
+                        allowed_types.append('internal')
+                    if m['_type'] in allowed_types:
+                        if m['_type'] == 'internal' and isinstance(out_message, dict):
+                            out_message = dict(out_message)
+                            existing = out_message.get('content') or ''
+                            if existing and not str(existing).lstrip().startswith('[reasoning]'):
+                                out_message['content'] = f"[reasoning] {existing}"
                         message_list.append(out_message)
 
             djson("message_history.json", message_list)
