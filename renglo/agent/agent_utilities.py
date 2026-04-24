@@ -9,7 +9,7 @@ from openai import OpenAI
 import random
 import json
 from datetime import datetime
-from typing import List, Dict, Any, Callable
+from typing import List, Dict, Any, Callable, Optional
 import re
 from decimal import Decimal
 import time
@@ -1370,6 +1370,87 @@ class AgentUtilities:
                 response["content"] = ""
 
         return {"success": True, "action": action, "output": response}
+
+    @staticmethod
+    def strip_orphan_tool_messages(message_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Remove tool messages that are not valid replies to a preceding assistant tool_calls
+        block. OpenAI Chat Completions rejects tool messages that appear without the
+        matching assistant message (e.g. trimmed history, ordering bugs).
+        """
+        if not message_list:
+            return message_list
+        out: List[Dict[str, Any]] = []
+        pending: Optional[set] = None
+
+        for m in message_list:
+            role = m.get("role")
+            if role == "assistant" and m.get("tool_calls"):
+                ids = set()
+                for tc in m["tool_calls"]:
+                    if isinstance(tc, dict) and tc.get("id"):
+                        ids.add(str(tc["id"]))
+                pending = ids if ids else None
+                out.append(m)
+                continue
+            if role == "tool":
+                tid_raw = m.get("tool_call_id")
+                tid = str(tid_raw) if tid_raw is not None else ""
+                if pending and tid and tid in pending:
+                    out.append(m)
+                    pending.discard(tid)
+                    if not pending:
+                        pending = None
+                    continue
+                continue
+            pending = None
+            out.append(m)
+        return out
+
+    @staticmethod
+    def ensure_tool_responses_after_assistant(
+        msgs: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        OpenAI requires every tool_call_id on an assistant message to have a following tool
+        message. Repair gaps (e.g. legacy history, trimming) with minimal JSON placeholders.
+        """
+        out: List[Dict[str, Any]] = []
+        i = 0
+        n = len(msgs)
+        while i < n:
+            m = msgs[i]
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                out.append(m)
+                req_ids: List[str] = []
+                for tc in m["tool_calls"]:
+                    if isinstance(tc, dict) and tc.get("id"):
+                        req_ids.append(str(tc["id"]))
+                i += 1
+                following: List[Dict[str, Any]] = []
+                while i < n and msgs[i].get("role") == "tool":
+                    following.append(msgs[i])
+                    i += 1
+                by_id: Dict[str, Dict[str, Any]] = {}
+                for tm in following:
+                    tid = tm.get("tool_call_id")
+                    if tid:
+                        by_id[str(tid)] = tm
+                for tid in req_ids:
+                    if tid in by_id:
+                        out.append(by_id[tid])
+                    else:
+                        out.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tid,
+                                "content": '{"error":"missing_tool_response_repaired"}',
+                            }
+                        )
+                continue
+            out.append(m)
+            i += 1
+        return out
 
     def clear_tool_message_content(self, message_list, recent_tool_messages=1):
         """

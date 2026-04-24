@@ -348,6 +348,8 @@ class AgentCore:
             
             # Clear content from all tool messages except the last one
             message_list = self.AGU.clear_tool_message_content(message_list['output'])
+            message_list = self.AGU.strip_orphan_tool_messages(message_list)
+            message_list = self.AGU.ensure_tool_responses_after_assistant(message_list)
             
             #print(f'Cleared Message History: {message_list}')
             
