@@ -133,8 +133,8 @@ class ChatController:
     # There is a document per turn in the database
     # Every turn document contains a list of messages that belong to that turn
 
-    def list_turns(self,portfolio,org,entity_type,entity_id,thread_id):
-
+    def list_turns(self, portfolio, org, entity_type, entity_id, thread_id, resolve=False):
+        # resolve: UI /messages passes True for future tmp-artifact inlining; unused for now.
         index = f"irn:chat:{portfolio}:{org}:{entity_type}/thread/time/turn:*/*/*/*"
 
         query = f"{entity_id}/{thread_id}"
@@ -144,7 +144,7 @@ class ChatController:
 
         #print(f'List Turns params >> {index} , {query}')
         #response = self.CHM.list_chat(index,secondary,limit,sort=sort)
-        response = self.CHM.query_chat(index,query,limit,sort=sort)
+        response = self.CHM.query_chat(index, query, limit, sort=sort)
 
         #print(f'List Turns>> {response}')
 

@@ -1624,7 +1624,7 @@ class AgentUtilities:
                 'output': str(e)
             }
 
-    def interpret(self, no_tools=False, list_actions=[], list_tools=[]):
+    def interpret(self, no_tools=False, list_actions=[], list_tools=[], max_history=None):
 
         action = 'interpret'
         self.print_chat('Interpreting message...', 'transient')
@@ -1641,6 +1641,9 @@ class AgentUtilities:
 
             # Clear content from all tool messages except the last one
             message_list = self.clear_tool_message_content(message_list['output'])
+
+            if max_history and isinstance(max_history, int) and max_history > 0:
+                message_list = message_list[-max_history:]
 
             #print(f'Cleared Message History: {message_list}')
 
