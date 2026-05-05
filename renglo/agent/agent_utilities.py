@@ -9,7 +9,7 @@ from openai import OpenAI
 import random
 import json
 from datetime import datetime
-from typing import List, Dict, Any, Callable, Optional
+from typing import List, Dict, Any, Callable
 import re
 from decimal import Decimal
 import time
@@ -81,14 +81,12 @@ class AgentUtilities:
         websocket_url = self.config.get('WEBSOCKET_CONNECTIONS', '')
         self.ws_client = WebSocketClient(websocket_url)
 
-    def get_message_history(self,filter={}, include_internal=False):
+    def get_message_history(self, filter={}):
         """
         Get the message history for the current thread.
         filter:{'param':<name>,'begins_with':<value>}
             param: The name of the parameter you are applying the filter: ['_interface','_next','_type']
             value: The begins at string for the value of the parameter to be filtered
-        include_internal: When True, also emit msg_type='internal' messages (ReAct scratchpad)
-            so the LLM can re-read its own prior reasoning.
 
         Returns:
             dict: Success status and message list
@@ -144,15 +142,7 @@ class AgentUtilities:
                         _logger_workspace.debug("message_filter_include | param=%s | value=%s", filter_param, param_value)
 
                     out_message = m['_out']
-                    allowed_types = ['user', 'consent', 'system', 'text', 'tool_rq', 'tool_rs']
-                    if include_internal:
-                        allowed_types.append('internal')
-                    if m['_type'] in allowed_types:
-                        if m['_type'] == 'internal' and isinstance(out_message, dict):
-                            out_message = dict(out_message)
-                            existing = out_message.get('content') or ''
-                            if existing and not str(existing).lstrip().startswith('[reasoning]'):
-                                out_message['content'] = f"[reasoning] {existing}"
+                    if m['_type'] in ['user', 'consent', 'system', 'text', 'tool_rq', 'tool_rs']:
                         message_list.append(out_message)
 
             djson("message_history.json", message_list)
@@ -1371,87 +1361,6 @@ class AgentUtilities:
 
         return {"success": True, "action": action, "output": response}
 
-    @staticmethod
-    def strip_orphan_tool_messages(message_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Remove tool messages that are not valid replies to a preceding assistant tool_calls
-        block. OpenAI Chat Completions rejects tool messages that appear without the
-        matching assistant message (e.g. trimmed history, ordering bugs).
-        """
-        if not message_list:
-            return message_list
-        out: List[Dict[str, Any]] = []
-        pending: Optional[set] = None
-
-        for m in message_list:
-            role = m.get("role")
-            if role == "assistant" and m.get("tool_calls"):
-                ids = set()
-                for tc in m["tool_calls"]:
-                    if isinstance(tc, dict) and tc.get("id"):
-                        ids.add(str(tc["id"]))
-                pending = ids if ids else None
-                out.append(m)
-                continue
-            if role == "tool":
-                tid_raw = m.get("tool_call_id")
-                tid = str(tid_raw) if tid_raw is not None else ""
-                if pending and tid and tid in pending:
-                    out.append(m)
-                    pending.discard(tid)
-                    if not pending:
-                        pending = None
-                    continue
-                continue
-            pending = None
-            out.append(m)
-        return out
-
-    @staticmethod
-    def ensure_tool_responses_after_assistant(
-        msgs: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """
-        OpenAI requires every tool_call_id on an assistant message to have a following tool
-        message. Repair gaps (e.g. legacy history, trimming) with minimal JSON placeholders.
-        """
-        out: List[Dict[str, Any]] = []
-        i = 0
-        n = len(msgs)
-        while i < n:
-            m = msgs[i]
-            if m.get("role") == "assistant" and m.get("tool_calls"):
-                out.append(m)
-                req_ids: List[str] = []
-                for tc in m["tool_calls"]:
-                    if isinstance(tc, dict) and tc.get("id"):
-                        req_ids.append(str(tc["id"]))
-                i += 1
-                following: List[Dict[str, Any]] = []
-                while i < n and msgs[i].get("role") == "tool":
-                    following.append(msgs[i])
-                    i += 1
-                by_id: Dict[str, Dict[str, Any]] = {}
-                for tm in following:
-                    tid = tm.get("tool_call_id")
-                    if tid:
-                        by_id[str(tid)] = tm
-                for tid in req_ids:
-                    if tid in by_id:
-                        out.append(by_id[tid])
-                    else:
-                        out.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tid,
-                                "content": '{"error":"missing_tool_response_repaired"}',
-                            }
-                        )
-                continue
-            out.append(m)
-            i += 1
-        return out
-
     def clear_tool_message_content(self, message_list, recent_tool_messages=1):
         """
         Clear content from all tool messages except the last x ones.
@@ -1705,7 +1614,7 @@ class AgentUtilities:
                 'output': str(e)
             }
 
-    def interpret(self, no_tools=False, list_actions=[], list_tools=[], max_history=None):
+    def interpret(self, no_tools=False, list_actions=[], list_tools=[]):
 
         action = 'interpret'
         self.print_chat('Interpreting message...', 'transient')
@@ -1722,9 +1631,6 @@ class AgentUtilities:
 
             # Clear content from all tool messages except the last one
             message_list = self.clear_tool_message_content(message_list['output'])
-
-            if max_history and isinstance(max_history, int) and max_history > 0:
-                message_list = message_list[-max_history:]
 
             #print(f'Cleared Message History: {message_list}')
 
