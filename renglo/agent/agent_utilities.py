@@ -81,7 +81,7 @@ class AgentUtilities:
         websocket_url = self.config.get('WEBSOCKET_CONNECTIONS', '')
         self.ws_client = WebSocketClient(websocket_url)
 
-    def get_message_history(self,filter={}):
+    def get_message_history(self, filter={}):
         """
         Get the message history for the current thread.
         filter:{'param':<name>,'begins_with':<value>}
@@ -142,7 +142,7 @@ class AgentUtilities:
                         _logger_workspace.debug("message_filter_include | param=%s | value=%s", filter_param, param_value)
 
                     out_message = m['_out']
-                    if m['_type'] in ['user', 'consent', 'system', 'text', 'tool_rq', 'tool_rs']:  # OK to show to LLM
+                    if m['_type'] in ['user', 'consent', 'system', 'text', 'tool_rq', 'tool_rs']:
                         message_list.append(out_message)
 
             djson("message_history.json", message_list)

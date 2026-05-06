@@ -123,23 +123,21 @@ class SessionController:
         item["events"] = []
         return item["events"]
 
-    def list_turns(self,portfolio,org,entity_type,entity_id,thread_id):
-              
-
+    def list_turns(self, portfolio, org, entity_type, entity_id, thread_id, resolve=False):
+        # resolve: same contract as chat list_turns; unused for now.
         index = f"irn:session:{portfolio}:{org}:{entity_type}/thread/time/turn:*/*/*/*"
 
         query = f"{entity_id}/{thread_id}"
-        
-        
+
         limit = 50
         sort = 'asc'
-        
+
         #print(f'List Turns params >> {index} , {query}')
         #response = self.SSM.list_session(index,secondary,limit,sort=sort)
-        response = self.SSM.query_session(index,query,limit,sort=sort)
-        
+        response = self.SSM.query_session(index, query, limit, sort=sort)
+
         #print(f'List Turns>> {response}')
-        
+
         return response
     
     

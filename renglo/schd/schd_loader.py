@@ -202,8 +202,14 @@ class SchdLoader:
             if runtime_loaded_class:
                 # Unload module to free memory
                 del instance
-                if actual_module_name in sys.modules:
-                    del sys.modules[actual_module_name]
+                # load_code_class imports as "<ext>.handlers.<name>" but actual_module_name
+                # is "<ext>.<name>" (no .handlers.) — delete both keys so the module is
+                # truly evicted and re-read from disk on the next call.
+                for _key in (
+                    actual_module_name,
+                    f"{module_parts[0]}.handlers.{module_parts[1]}",
+                ):
+                    sys.modules.pop(_key, None)
                 gc.collect()
 
             if result is None:
