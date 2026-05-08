@@ -7,7 +7,8 @@ from renglo.schd.schd_controller import SchdController
 from renglo.agent.agent_utilities import AgentUtilities
 
 
-from openai import OpenAI
+from langfuse.openai import OpenAI
+from langfuse import propagate_attributes
 
 import random
 import json
@@ -863,90 +864,91 @@ class AgentCore:
         
         # Set the initial context for this turn
         self._set_context(context)
-        
-        results = []
-         
-        # Get the initial chat message history and put it in the context
-        message_history = self.AGU.get_message_history()
-        if not message_history['success']:
-            return {'success':False,'action':action,'output':message_history}
-            
-        # Update context with message history
-        self._update_context(message_history=message_history['output'])
-        #print(f'FULL message history:{message_history}')
-           
-        try:
-            
-            # Step 0: Create thread/message document
-            response_0 = self.AGU.new_chat_message_document(payload['data'], public_user=context.public_user)
-            results.append(response_0)
-            if not response_0['success']: 
-                return {'success':False,'action':action,'output':results}
-             
-            # Step 0b: Pre-process message
-            response_0b = self.pre_process_message(payload['data'])
-            results.append(response_0b)
-            if not response_0b['success']: 
-                return {'success':False,'action':action,'output':results}
-            
-            
-            loops = 0
-            loop_limit = 6
-            while loops < loop_limit:
-                loops = loops + 1
-                print(f'Loop iteration {loops}/{loop_limit}')
-                
-                # Step 1: Interpret. We receive the message from the user and we issue a tool command or another message       
-                response_1 = self.interpret()
+
+        with propagate_attributes(session_id=context.thread, user_id=context.org):
+            results = []
+
+            # Get the initial chat message history and put it in the context
+            message_history = self.AGU.get_message_history()
+            if not message_history['success']:
+                return {'success':False,'action':action,'output':message_history}
+
+            # Update context with message history
+            self._update_context(message_history=message_history['output'])
+            #print(f'FULL message history:{message_history}')
+
+            try:
+
+                # Step 0: Create thread/message document
+                response_0 = self.AGU.new_chat_message_document(payload['data'], public_user=context.public_user)
+                results.append(response_0)
+                if not response_0['success']:
+                    return {'success':False,'action':action,'output':results}
+
+                # Step 0b: Pre-process message
+                response_0b = self.pre_process_message(payload['data'])
+                results.append(response_0b)
+                if not response_0b['success']:
+                    return {'success':False,'action':action,'output':results}
+
+
+                loops = 0
+                loop_limit = 6
+                while loops < loop_limit:
+                    loops = loops + 1
+                    print(f'Loop iteration {loops}/{loop_limit}')
+
+                    # Step 1: Interpret. We receive the message from the user and we issue a tool command or another message
+                    response_1 = self.interpret()
+                    results.append(response_1)
+                    if not response_1['success']:
+                        # Something went wrong during message interpretation
+                        return {'success':False,'action':action,'output':results}
+
+
+                    # Check whether we need to run a tool
+                    if 'tool_calls' not in response_1['output'] or not response_1['output']['tool_calls']:
+                        # No tool needs execution.
+                        # Most likely the agent is asking for more information to fill tool parameters.
+                        # Or agent is answering questions directly from the belief system.
+                        self.AGU.print_chat(f'🤖','text', connection_id=context.connection_id)
+                        return {'success':True,'action':action,'input':payload,'output':results}
+
+                    else:
+                        # Step 2: Act. Agent runs the tool
+                        response_2 = self.act(response_1['output'])
+                        results.append(response_2)
+
+
+                        # Step 3: Check if answer needs to go out without LLM interpretation
+                        #if 'direct_out' in response_2:
+
+                        if not response_2['success']:
+                            # Something went wrong during tool execution
+                            return {'success':False,'action':action,'output':results}
+
+
+
+
+                #Gracious exit. Analyze the last tool run (act()) but you can't issue a new tool_call.
+                response_1 = self.interpret(no_tools=True)
                 results.append(response_1)
                 if not response_1['success']:
-                    # Something went wrong during message interpretation
-                    return {'success':False,'action':action,'output':results}  
-                       
-                
-                # Check whether we need to run a tool
-                if 'tool_calls' not in response_1['output'] or not response_1['output']['tool_calls']:
-                    # No tool needs execution. 
-                    # Most likely the agent is asking for more information to fill tool parameters. 
-                    # Or agent is answering questions directly from the belief system.
-                    self.AGU.print_chat(f'🤖','text', connection_id=context.connection_id)
-                    return {'success':True,'action':action,'input':payload,'output':results}
-                                
-                else:
-                    # Step 2: Act. Agent runs the tool
-                    response_2 = self.act(response_1['output'])
-                    results.append(response_2)
-                    
-                    
-                    # Step 3: Check if answer needs to go out without LLM interpretation
-                    #if 'direct_out' in response_2:
-                        
-                    if not response_2['success']:
-                        # Something went wrong during tool execution
+                        # Something went wrong during message interpretation
                         return {'success':False,'action':action,'output':results}
-                    
-                    
-                    
-            
-            #Gracious exit. Analyze the last tool run (act()) but you can't issue a new tool_call. 
-            response_1 = self.interpret(no_tools=True)
-            results.append(response_1)
-            if not response_1['success']:
-                    # Something went wrong during message interpretation
-                    return {'success':False,'action':action,'output':results} 
-            
-            
-            # If we reach here, we hit the loop limit
-            print(f'Warning: Reached maximum loop limit ({loop_limit})')
-            #self.print_chat(f'🤖⚠️  Can you re-formulate your request please?','text')
-            return {'success':True,'action':action,'input':payload,'output':results}
-                    
 
-            
-        except Exception as e:
-            self.AGU.print_chat(e,'text', connection_id=context.connection_id)
-            self.AGU.print_chat(f'🤖❌','text', connection_id=context.connection_id)
-            return {'success':False,'action':action,'message':f'Run failed. Error:{str(e)}','output':results}
+
+                # If we reach here, we hit the loop limit
+                print(f'Warning: Reached maximum loop limit ({loop_limit})')
+                #self.print_chat(f'🤖⚠️  Can you re-formulate your request please?','text')
+                return {'success':True,'action':action,'input':payload,'output':results}
+
+
+
+            except Exception as e:
+                self.AGU.print_chat(e,'text', connection_id=context.connection_id)
+                self.AGU.print_chat(f'🤖❌','text', connection_id=context.connection_id)
+                return {'success':False,'action':action,'message':f'Run failed. Error:{str(e)}','output':results}
 
     
 
