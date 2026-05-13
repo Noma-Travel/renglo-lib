@@ -1573,8 +1573,11 @@ class AuthController:
         else:
             transaction.append(response_1)
 
-        # Optional: auto-install default tools/workflows for the new org.
-        # Best-effort and should not block org creation.
+        # Auto-install default tools/workflows for the new org.
+        # This ensures the org has schd_tools, schd_actions, jobs, and
+        # noma_config immediately—no manual Console upload needed.
+        onboarding_ok = False
+        onboarding_skipped = False
         try:
             from noma.handlers.noma_onboardings import NomaOnboardings  # type: ignore
 
@@ -1594,40 +1597,69 @@ class AuthController:
                     "portfolio": portfolio_id,
                     "team": team_id,
                     "org": org_id,
-                    # Optional field used by downstream config creation.
                     "name": kwargs.get("name", "org"),
                 }
                 onboarding_result = onboarding.run(onboarding_payload)
+                onboarding_ok = bool(onboarding_result.get("success"))
                 transaction.append(
                     {
-                        "success": bool(onboarding_result.get("success")),
+                        "success": onboarding_ok,
                         "message": "Installed default tools for org"
-                        if onboarding_result.get("success")
+                        if onboarding_ok
                         else "Failed installing default tools for org",
                         "document": onboarding_result,
-                        "status": 200 if onboarding_result.get("success") else 500,
+                        "status": 200 if onboarding_ok else 500,
                         "action": "install_default_tools",
                     }
                 )
+                self.logger.info(
+                    "create_org_funnel | install_default_tools "
+                    f"| portfolio={portfolio_id} org={org_id} team={team_id} "
+                    f"| success={onboarding_ok}"
+                )
             else:
-                self.logger.debug(
-                    "Skipping default tool install (missing portfolio/org/team)"
+                onboarding_skipped = True
+                self.logger.warning(
+                    "create_org_funnel | install_default_tools SKIPPED "
+                    f"| portfolio={portfolio_id} org={org_id} team={team_id} "
+                    "| reason=missing_ids"
+                )
+                transaction.append(
+                    {
+                        "success": False,
+                        "message": "Skipped tool install: could not resolve team for portfolio",
+                        "status": 500,
+                        "action": "install_default_tools",
+                    }
                 )
         except Exception as e:
-            self.logger.exception(f"Default tool install failed: {e}")
+            self.logger.exception(
+                f"create_org_funnel | install_default_tools EXCEPTION | {e}"
+            )
+            transaction.append(
+                {
+                    "success": False,
+                    "message": f"Tool install exception: {e}",
+                    "status": 500,
+                    "action": "install_default_tools",
+                }
+            )
 
-
-
-
-        #All went good, Summarize Transaction Success 
         self.logger.debug('End of Funnel ')
 
-        result['success'] = True
-        result['message'] = 'Create Org  Funnel completed, Ok'
-        result['status'] = 200 
-        result['document'] = transaction  
+        if onboarding_ok:
+            result['success'] = True
+            result['message'] = 'Create Org Funnel completed, Ok'
+            result['status'] = 200
+        else:
+            result['success'] = True
+            result['message'] = 'Org created but tool provisioning failed'
+            result['status'] = 207
+            result['provisioning_failed'] = True
 
-        self.logger.debug(result)            
+        result['document'] = transaction
+
+        self.logger.debug(result)
         return result
 
 
@@ -1636,6 +1668,11 @@ class AuthController:
         Best-effort selection of a team id for a given user within a portfolio.
         Used to wire up default tools/relations when a client creates a new org
         without specifying a team.
+
+        Strategy:
+        1. Walk user->team rels and find one linked to this portfolio.
+        2. Fallback: query portfolio's team entities and pick the first one
+           (typically the 'Admin' team created by create_portfolio_funnel).
         """
         try:
             index = 'irn:rel:user:team:' + user_id + ':*'
@@ -1651,7 +1688,24 @@ class AuthController:
                 if rel and rel.get("success"):
                     return team_id
         except Exception:
-            self.logger.exception("Failed picking user team for portfolio")
+            self.logger.exception("Failed picking user team for portfolio via rels")
+
+        # Fallback: query team entities owned by this portfolio directly.
+        try:
+            index = f'irn:entity:portfolio/team:{portfolio_id}:*'
+            teams_resp = self.AUM.list_entity(index, limit=50)
+            team_items = (teams_resp or {}).get("document", {}).get("items", []) or []
+            for team in team_items:
+                tid = team.get("_id")
+                if tid:
+                    self.logger.debug(
+                        f"_pick_user_team_in_portfolio fallback: using team {tid} "
+                        f"(name={team.get('name')}) from portfolio entity list"
+                    )
+                    return tid
+        except Exception:
+            self.logger.exception("Failed picking team via portfolio entity fallback")
+
         return None
 
 
