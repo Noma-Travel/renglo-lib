@@ -621,19 +621,19 @@ class DataController:
                 else:
 
                     '''
-                        len>0  |  field['required']  | AND   |  (len > 0) OR (AND)
-                        ---------------------------------------------
-                        True   |   False             | False |  True
-                        ---------------------------------------------
-                        True   |   True              | True  |  True
-                        ---------------------------------------------
-                        False  |   False             | True  |  -
-                        ---------------------------------------------
-                        False  |   True              | False |  False
+                        Accept the value when it is non-empty, OR when the field is
+                        optional (allowing the caller to clear a non-required field
+                        with an empty string).
 
+                        len>0  |  field['required']  |  accept
+                        --------------------------------------
+                        True   |   False             |  True
+                        True   |   True              |  True
+                        False  |   False             |  True   (clear optional field)
+                        False  |   True              |  False  (required → reject)
                     '''
 
-                    if len(str(new_raw)) > 0 or (len(str(new_raw)) and field['required']):
+                    if len(str(new_raw)) > 0 or not field['required']:
 
                         self.logger.debug('Field OK:'+field['name'])
                         #Attribute complies with "Required" prerequisite
