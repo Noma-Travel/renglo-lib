@@ -121,7 +121,9 @@ def load_config():
         # Microsoft Outlook OAuth / token encryption
         'NEXT_PUBLIC_MS_TENANT_ID', 'NEXT_PUBLIC_MS_CLIENT_ID',
         'NEXT_PUBLIC_MS_CLIENT_SECRET', 'NEXT_PUBLIC_MS_REDIRECT_URI',
-        'TOKENS_KMS_KEY_ID'
+        'TOKENS_KMS_KEY_ID',
+        # Resend transactional email (used by auth_model.send_email / invite_user_funnel)
+        'RESEND_API_KEY', 'INVITE_FROM',
     ]
 
     env_loaded_count = 0
