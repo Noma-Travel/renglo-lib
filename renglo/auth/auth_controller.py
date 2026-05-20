@@ -308,6 +308,104 @@ class AuthController:
             
 
 
+    def is_global_admin(self, cognito_groups=None, user_id=None):
+        """Platform admin: Cognito group global_admin or user entity slot_d."""
+        if cognito_groups:
+            groups = cognito_groups if isinstance(cognito_groups, list) else [cognito_groups]
+            if 'global_admin' in groups:
+                return True
+        if user_id:
+            user_entity = self.get_entity('user', user_id=user_id)
+            if user_entity.get('success'):
+                doc = user_entity.get('document') or {}
+                if doc.get('slot_d') == 'global_admin':
+                    return True
+        return False
+
+    def _list_all_entities(self, index, limit=50):
+        """Paginate list_entity until all items for an index are loaded."""
+        all_items = []
+        start_key = None
+        while True:
+            response = self.AUM.list_entity(index, limit=limit, lastkey=start_key)
+            if not response.get('success'):
+                break
+            doc = response.get('document') or {}
+            all_items.extend(doc.get('items') or [])
+            lek = doc.get('lastkey')
+            if not lek:
+                break
+            if isinstance(lek, dict):
+                start_key = lek.get('ref')
+            else:
+                start_key = lek
+        return all_items
+
+    def get_tree_global_admin(self, **kwargs):
+        """
+        Build auth tree with every portfolio, org, and tool (no team membership required).
+        """
+        user_id = kwargs.get('user_id')
+        tree = {
+            'user_id': user_id,
+            'is_global_admin': True,
+            'portfolios': {},
+        }
+        self.logger.debug('GENERATING GLOBAL ADMIN TREE')
+
+        portfolio_items = self._list_all_entities('irn:entity:portfolio:*')
+        for portfolio in portfolio_items:
+            portfolio_id = portfolio.get('_id')
+            if not portfolio_id:
+                continue
+
+            portfolio_doc = {
+                'portfolio_id': portfolio_id,
+                'name': portfolio.get('name', portfolio_id),
+                'teams': {},
+                'orgs': {},
+                'tools': {},
+            }
+            tree['portfolios'][portfolio_id] = portfolio_doc
+
+            tool_ids = []
+            tool_items = self._list_all_entities(
+                'irn:entity:portfolio/tool:' + portfolio_id + '/*'
+            )
+            for tool in tool_items:
+                tool_id = tool.get('_id')
+                if not tool_id:
+                    continue
+                tool_ids.append(tool_id)
+                portfolio_doc['tools'][tool_id] = {
+                    'tool_id': tool_id,
+                    'name': tool.get('name', tool_id),
+                    'handle': tool.get('handle', tool_id),
+                    'active': True,
+                }
+
+            org_items = self._list_all_entities(
+                'irn:entity:portfolio/org:' + portfolio_id + '/*'
+            )
+            for org in org_items:
+                org_id = org.get('_id')
+                if not org_id:
+                    continue
+                portfolio_doc['orgs'][org_id] = {
+                    'org_id': org_id,
+                    'name': org.get('name', org_id),
+                    'handle': org.get('handle', org_id),
+                    'active': True,
+                    'tools': list(tool_ids),
+                }
+
+        response = {
+            'success': True,
+            'document': tree,
+            'status': 200,
+        }
+        return response
+
     def get_tree_full(self,**kwargs):
         # Auth Tree after resolving each document ID 
         # Instead of creating a function to query each entity separately (many functions), 
