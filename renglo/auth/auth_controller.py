@@ -2085,16 +2085,19 @@ class AuthController:
             bridge['teamdoc'] = response_1a['document']
 
 
-        #1b. Get Sender document
-
+        #1b. Get Sender document (optional — email copy works without a name)
         response_1b = self.get_entity(
             'user',
             user_id=kwargs['sender_id']
         )
-        if not response_1b['success']:
-            return response_1b
-        else:
+        if response_1b['success']:
             bridge['senderdoc'] = response_1b['document']
+        else:
+            self.logger.debug(
+                'Invite funnel: sender user entity not found for %s; using neutral email copy',
+                kwargs.get('sender_id'),
+            )
+            bridge['senderdoc'] = {}
         
 
 
