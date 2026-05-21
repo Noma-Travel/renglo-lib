@@ -4,8 +4,12 @@ from botocore.exceptions import ClientError
 from datetime import datetime
 import uuid
 from decimal import Decimal
+import requests
 
 logger = logging.getLogger(__name__)
+
+RESEND_API_URL = "https://api.resend.com/emails"
+RESEND_TIMEOUT_SECONDS = 10
 
 
 class AuthModel:
@@ -243,64 +247,81 @@ class AuthModel:
 
 
 
-#---------------------------------------------------- AWS SES
+#---------------------------------------------------- RESEND (transactional email)
 
 
 
     def send_email(self, sender, recipient, subject, body_text, body_html):
-        # Initialize the SES client
-        ses_client = boto3.client('ses', region_name=self.config.get('COGNITO_REGION', 'us-east-1'))  # Replace with your AWS region
+        """
+        Send a transactional email via Resend (https://resend.com).
 
-        # Email details
-        email_data = {
-            'Source': sender,
-            'Destination': {
-                'ToAddresses': [
-                    recipient,
-                ],
-            },
-            'Message': {
-                'Subject': {
-                    'Data': subject,
-                    'Charset': 'UTF-8'
-                },
-                'Body': {
-                    'Text': {
-                        'Data': body_text,
-                        'Charset': 'UTF-8'
-                    },
-                    'Html': {
-                        'Data': body_html,
-                        'Charset': 'UTF-8'
-                    }
-                }
+        Requires RESEND_API_KEY in config. The `sender` must come from a domain
+        verified in the Resend account; otherwise Resend returns 422.
+
+        Returns the same envelope shape the rest of the codebase expects:
+            {success: bool, message: str, document: dict, status: int}
+        """
+        api_key = (self.config.get('RESEND_API_KEY') or '').strip()
+        if not api_key:
+            return {
+                "success": False,
+                "message": "RESEND_API_KEY is not configured",
+                "document": {"error": "missing_api_key"},
+                "status": 500,
             }
+
+        payload = {
+            "from": sender,
+            "to": [recipient] if isinstance(recipient, str) else list(recipient),
+            "subject": subject,
+            "html": body_html,
+            "text": body_text,
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
         }
 
         try:
-            # Send the email
-            response = ses_client.send_email(**email_data)
-
-            if response['MessageId']:
-                return{
-                    "success":True, 
-                    "message": "Email sent", 
-                    "document": {
-                        'MessageId':response['MessageId']
-                        },
-                    "status" : response['ResponseMetadata']['HTTPStatusCode']
-                }
- 
-        except ClientError as e:
-            '''
-            example e: 'Email address is not verified. The following identities failed the check in region US-EAST-1: user@email.com'
-            '''
+            response = requests.post(
+                RESEND_API_URL,
+                json=payload,
+                headers=headers,
+                timeout=RESEND_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as exc:
             return {
-                "success":False, 
-                "message": e.response['Error']['Message'],
-                "document": e.response,
-                "status" : e.response['ResponseMetadata']['HTTPStatusCode']
+                "success": False,
+                "message": f"Resend request failed: {exc}",
+                "document": {"error": "network_error"},
+                "status": 502,
             }
+
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"raw": response.text}
+
+        if 200 <= response.status_code < 300:
+            return {
+                "success": True,
+                "message": "Email sent",
+                "document": {"MessageId": data.get("id"), "provider": "resend"},
+                "status": response.status_code,
+            }
+
+        # Resend error envelope: {"name": "...", "message": "...", "statusCode": ...}
+        error_message = (
+            data.get("message")
+            if isinstance(data, dict)
+            else f"Resend HTTP {response.status_code}"
+        )
+        return {
+            "success": False,
+            "message": error_message or f"Resend HTTP {response.status_code}",
+            "document": data if isinstance(data, dict) else {"raw": data},
+            "status": response.status_code,
+        }
             
 
 

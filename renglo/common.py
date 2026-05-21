@@ -107,7 +107,7 @@ def load_config():
     # Load from environment variables (overwrites file-based config)
     # This allows Lambda/production to use environment variables
     env_var_keys = [
-        'WL_NAME', 'BASE_URL', 'FE_BASE_URL', 'DOC_BASE_URL',
+        'WL_NAME', 'BASE_URL', 'FE_BASE_URL', 'APP_FE_BASE_URL', 'DOC_BASE_URL',
         'AWS_REGION', 'API_GATEWAY_ARN', 'ROLE_ARN', 'SYS_ENV',
         'DYNAMODB_ENTITY_TABLE', 'DYNAMODB_BLUEPRINT_TABLE', 'DYNAMODB_RINGDATA_TABLE',
         'DYNAMODB_REL_TABLE', 'DYNAMODB_CHAT_TABLE', 'DYNAMODB_SESSION_TABLE',
@@ -115,13 +115,15 @@ def load_config():
         'COGNITO_REGION', 'COGNITO_USERPOOL_ID', 'COGNITO_APP_CLIENT_ID',
         'COGNITO_CHECK_TOKEN_EXPIRATION',
         'PREVIEW_LAYER', 'S3_BUCKET_NAME',
-        'OPENAI_API_KEY', 'WEBSOCKET_CONNECTIONS', 'AVIATION_STACK_API_KEY',
+        'OPENAI_API_KEY', 'WEBSOCKET_CONNECTIONS', 'AVIATION_STACK_API_KEY', 'RESEND_API_KEY',
         'ALLOW_DEV_ORIGINS', 'EXTERNAL_HANDLERS',
         'OPENSEARCH_ENDPOINT', 'OPENSEARCH_INDEX', 'OPENSEARCH_REFRESH',
         # Microsoft Outlook OAuth / token encryption
         'NEXT_PUBLIC_MS_TENANT_ID', 'NEXT_PUBLIC_MS_CLIENT_ID',
         'NEXT_PUBLIC_MS_CLIENT_SECRET', 'NEXT_PUBLIC_MS_REDIRECT_URI',
-        'TOKENS_KMS_KEY_ID'
+        'TOKENS_KMS_KEY_ID',
+        # Invite / transactional email (auth_model.send_email, invite_user_funnel, invite_attendant)
+        'INVITE_FROM', 'SES_INVITE_SENDER',
     ]
 
     env_loaded_count = 0
