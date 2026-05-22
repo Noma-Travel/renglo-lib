@@ -401,6 +401,20 @@ class AuthController:
                     'tools': list(tool_ids),
                 }
 
+            team_items = self._list_all_entities(
+                'irn:entity:portfolio/team:' + portfolio_id + '/*'
+            )
+            for team in team_items:
+                team_id = team.get('_id')
+                if not team_id:
+                    continue
+                portfolio_doc['teams'][team_id] = {
+                    'team_id': team_id,
+                    'name': team.get('name', team_id),
+                    'handle': team.get('handle', team_id),
+                    'tools': {},
+                }
+
         response = {
             'success': True,
             'document': tree,
