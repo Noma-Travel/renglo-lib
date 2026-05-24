@@ -116,7 +116,7 @@ class AuthController:
         return None
 
 
-    def invite_user(self,email,team_id,portfolio_id,sender_id):
+    def invite_user(self,email,team_id,portfolio_id,sender_id,locale='en'):
         '''
         Invites user to a team
 
@@ -124,6 +124,7 @@ class AuthController:
         - email
         - team_id
         - portfolio_id
+        - locale (optional): 'pt' or 'en' for localized invite email
         '''
         # 1. Check whether the email is valid
         #This function is not working. It is rejecting valid emails
@@ -200,7 +201,8 @@ class AuthController:
             email=email,
             team_id=team_id,
             portfolio_id=portfolio_id,
-            sender_id=sender_id
+            sender_id=sender_id,
+            locale=locale
             )
         
         self.logger.debug('Invite User Funnel > response: '+ str(response))
@@ -307,6 +309,118 @@ class AuthController:
         return False
             
 
+
+    def is_global_admin(self, cognito_groups=None, user_id=None):
+        """Platform admin: Cognito group global_admin or user entity slot_d."""
+        if cognito_groups:
+            groups = cognito_groups if isinstance(cognito_groups, list) else [cognito_groups]
+            if 'global_admin' in groups:
+                return True
+        if user_id:
+            user_entity = self.get_entity('user', user_id=user_id)
+            if user_entity.get('success'):
+                doc = user_entity.get('document') or {}
+                if doc.get('slot_d') == 'global_admin':
+                    return True
+        return False
+
+    def _list_all_entities(self, index, limit=50):
+        """Paginate list_entity until all items for an index are loaded."""
+        all_items = []
+        start_key = None
+        while True:
+            response = self.AUM.list_entity(index, limit=limit, lastkey=start_key)
+            if not response.get('success'):
+                break
+            doc = response.get('document') or {}
+            all_items.extend(doc.get('items') or [])
+            lek = doc.get('lastkey')
+            if not lek:
+                break
+            if isinstance(lek, dict):
+                start_key = lek.get('ref')
+            else:
+                start_key = lek
+        return all_items
+
+    def get_tree_global_admin(self, **kwargs):
+        """
+        Build auth tree with every portfolio, org, and tool (no team membership required).
+        """
+        user_id = kwargs.get('user_id')
+        tree = {
+            'user_id': user_id,
+            'is_global_admin': True,
+            'portfolios': {},
+        }
+        self.logger.debug('GENERATING GLOBAL ADMIN TREE')
+
+        portfolio_items = self._list_all_entities('irn:entity:portfolio:*')
+        for portfolio in portfolio_items:
+            portfolio_id = portfolio.get('_id')
+            if not portfolio_id:
+                continue
+
+            portfolio_doc = {
+                'portfolio_id': portfolio_id,
+                'name': portfolio.get('name', portfolio_id),
+                'teams': {},
+                'orgs': {},
+                'tools': {},
+            }
+            tree['portfolios'][portfolio_id] = portfolio_doc
+
+            tool_ids = []
+            tool_items = self._list_all_entities(
+                'irn:entity:portfolio/tool:' + portfolio_id + '/*'
+            )
+            for tool in tool_items:
+                tool_id = tool.get('_id')
+                if not tool_id:
+                    continue
+                tool_ids.append(tool_id)
+                portfolio_doc['tools'][tool_id] = {
+                    'tool_id': tool_id,
+                    'name': tool.get('name', tool_id),
+                    'handle': tool.get('handle', tool_id),
+                    'active': True,
+                }
+
+            org_items = self._list_all_entities(
+                'irn:entity:portfolio/org:' + portfolio_id + '/*'
+            )
+            for org in org_items:
+                org_id = org.get('_id')
+                if not org_id:
+                    continue
+                portfolio_doc['orgs'][org_id] = {
+                    'org_id': org_id,
+                    'name': org.get('name', org_id),
+                    'handle': org.get('handle', org_id),
+                    'active': True,
+                    'tools': list(tool_ids),
+                }
+
+            team_items = self._list_all_entities(
+                'irn:entity:portfolio/team:' + portfolio_id + '/*'
+            )
+            for team in team_items:
+                team_id = team.get('_id')
+                if not team_id:
+                    continue
+                portfolio_doc['teams'][team_id] = {
+                    'team_id': team_id,
+                    'name': team.get('name', team_id),
+                    'handle': team.get('handle', team_id),
+                    'tools': {},
+                }
+
+        response = {
+            'success': True,
+            'document': tree,
+            'status': 200,
+        }
+        return response
 
     def get_tree_full(self,**kwargs):
         # Auth Tree after resolving each document ID 
@@ -1870,6 +1984,187 @@ class AuthController:
     
 
 
+    # ------------------------------------------------------------------
+    # Invite email rendering (Noma brand)
+    # ------------------------------------------------------------------
+    # Cores e tipografia espelham o template do frontend
+    # (Noma/app/api/email/send-flights/route.ts) para manter consistência
+    # visual entre e-mails transacionais.
+    _INVITE_BRAND = {
+        'navy': '#0B1724',
+        'green': '#6CEF92',
+        'green_light': '#E8FEF0',
+        'bg': '#f5f3ee',
+        'body_text': '#374151',
+        'muted': '#9ca3af',
+        'card_border': '#e8f5e0',
+    }
+
+    # i18n strings for the invite email. Keep keys stable; only translations change.
+    # Placeholders use Python str.format syntax: {sender}, {team}, {brand}.
+    _INVITE_I18N = {
+        'en': {
+            'lang_attr': 'en',
+            'title': '{brand} invitation',
+            'header_subtitle': 'You have a new invitation',
+            'welcome': 'Welcome to {brand} 👋',
+            'invited_by_html_with_sender': '{sender} invited you to join <strong>{team}</strong> on {brand}.',
+            'invited_by_html_no_sender': "You've been invited to join <strong>{team}</strong> on {brand}.",
+            'invited_by_text_with_sender': '{sender} invited you to join {team} on {brand}.',
+            'invited_by_text_no_sender': "You've been invited to join {team} on {brand}.",
+            'subject_with_sender': '{sender} invited you to {team} on {brand}',
+            'subject_no_sender': "You're invited to join {team} on {brand}",
+            'cta': 'Accept invitation →',
+            'fallback_intro': "If the button doesn't work, paste this link in your browser:",
+            'expiry_hint': "This invitation expires in 24 hours. If you weren't expecting this email, you can safely ignore it.",
+            'footer': 'Sent by',
+            'accept_action_text': 'Accept the invitation:',
+            'fallback_team_label': 'your team',
+            'signature_dash': '— ',
+        },
+        'pt': {
+            'lang_attr': 'pt-BR',
+            'title': 'Convite para {brand}',
+            'header_subtitle': 'Você tem um novo convite',
+            'welcome': 'Bem-vindo(a) ao {brand} 👋',
+            'invited_by_html_with_sender': '{sender} convidou você para entrar em <strong>{team}</strong> no {brand}.',
+            'invited_by_html_no_sender': 'Você foi convidado(a) para entrar em <strong>{team}</strong> no {brand}.',
+            'invited_by_text_with_sender': '{sender} convidou você para entrar em {team} no {brand}.',
+            'invited_by_text_no_sender': 'Você foi convidado(a) para entrar em {team} no {brand}.',
+            'subject_with_sender': '{sender} convidou você para {team} no {brand}',
+            'subject_no_sender': 'Você foi convidado(a) para entrar em {team} no {brand}',
+            'cta': 'Aceitar convite →',
+            'fallback_intro': 'Se o botão não funcionar, cole este link no seu navegador:',
+            'expiry_hint': 'Este convite expira em 24 horas. Se você não estava esperando este e-mail, pode ignorá-lo com segurança.',
+            'footer': 'Enviado por',
+            'accept_action_text': 'Aceitar o convite:',
+            'fallback_team_label': 'seu time',
+            'signature_dash': '— ',
+        },
+    }
+
+    def _build_invite_email(self, sender_name, portfolio_name, team_name,
+                            code, invite_url, brand_name='Noma', locale='en'):
+        """
+        Renders the invite email in Noma brand style, localized per `locale`.
+        Returns dict with keys: subject, body_text, body_html.
+
+        sender_name pode vir vazio (quando o doc do convidador não tem nome);
+        nesse caso usamos um fraseamento neutro para não exibir "by  to team".
+
+        locale: 'pt' or 'en' (defaults to 'en' if unsupported value provided).
+        The `code` arg is kept in the signature for backward compatibility,
+        but is no longer shown in the email body (the invite URL already
+        carries it).
+        """
+        brand = self._INVITE_BRAND
+        # Normalize locale: accept variants like 'pt-BR', 'en-US'.
+        loc_root = (locale or 'en').split('-')[0].lower()
+        t = self._INVITE_I18N.get(loc_root) or self._INVITE_I18N['en']
+
+        team_label = f"{portfolio_name}/{team_name}" if portfolio_name and team_name else (
+            portfolio_name or team_name or t['fallback_team_label']
+        )
+        sender_display = (sender_name or '').strip()
+
+        invited_by_line = (
+            t['invited_by_html_with_sender'].format(sender=sender_display, team=team_label, brand=brand_name)
+            if sender_display
+            else t['invited_by_html_no_sender'].format(team=team_label, brand=brand_name)
+        )
+        invited_by_text = (
+            t['invited_by_text_with_sender'].format(sender=sender_display, team=team_label, brand=brand_name)
+            if sender_display
+            else t['invited_by_text_no_sender'].format(team=team_label, brand=brand_name)
+        )
+
+        subject = (
+            t['subject_with_sender'].format(sender=sender_display, team=team_label, brand=brand_name)
+            if sender_display
+            else t['subject_no_sender'].format(team=team_label, brand=brand_name)
+        )
+
+        body_text = (
+            f"{invited_by_text}\n\n"
+            f"{t['accept_action_text']}\n{invite_url}\n\n"
+            f"{t['expiry_hint']}\n\n"
+            f"{t['signature_dash']}{brand_name}"
+        )
+
+        body_html = (
+            '<!DOCTYPE html>'
+            f'<html lang="{t["lang_attr"]}"><head>'
+            '<meta charset="UTF-8" />'
+            '<meta name="viewport" content="width=device-width, initial-scale=1.0" />'
+            f'<title>{t["title"].format(brand=brand_name)}</title>'
+            '</head>'
+            f'<body style="margin:0;padding:0;background:{brand["bg"]};'
+            "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;\">"
+            f'<table cellpadding="0" cellspacing="0" width="100%" style="background:{brand["bg"]};">'
+            '<tr><td align="center" style="padding:32px 16px;">'
+            '<table cellpadding="0" cellspacing="0" width="100%" style="max-width:560px;">'
+
+            # Header
+            '<tr><td style="background:' + brand['navy'] + ';border-radius:16px 16px 0 0;padding:28px 32px;">'
+            '<div style="font-size:24px;font-weight:800;color:#ffffff;letter-spacing:-0.5px;">'
+            f'<span style="color:{brand["green"]};">✦</span> {brand_name}'
+            '</div>'
+            '<div style="font-size:13px;color:rgba(255,255,255,0.65);margin-top:4px;">'
+            f'{t["header_subtitle"]}'
+            '</div>'
+            '</td></tr>'
+
+            # Body
+            f'<tr><td style="background:#ffffff;padding:32px 32px 16px;">'
+            f'<h1 style="margin:0 0 8px;font-size:22px;font-weight:800;color:{brand["navy"]};letter-spacing:-0.4px;">'
+            f'{t["welcome"].format(brand=brand_name)}'
+            '</h1>'
+            f'<p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:{brand["body_text"]};">'
+            f'{invited_by_line}'
+            '</p>'
+
+            # CTA button
+            '<table cellpadding="0" cellspacing="0" width="100%"><tr><td align="center" style="padding:8px 0 24px;">'
+            f'<a href="{invite_url}" target="_blank" '
+            f'style="display:inline-block;padding:14px 32px;background:{brand["navy"]};'
+            'color:#ffffff;font-size:14px;font-weight:700;text-decoration:none;'
+            'border-radius:10px;letter-spacing:0.2px;">'
+            f'{t["cta"]}'
+            '</a>'
+            '</td></tr></table>'
+
+            # Fallback link
+            f'<p style="margin:0 0 8px;font-size:12px;color:{brand["muted"]};">'
+            f'{t["fallback_intro"]}'
+            '</p>'
+            f'<p style="margin:0 0 24px;font-size:12px;color:{brand["body_text"]};word-break:break-all;">'
+            f'<a href="{invite_url}" style="color:{brand["navy"]};text-decoration:underline;">{invite_url}</a>'
+            '</p>'
+
+            # Expiry hint
+            f'<p style="margin:0;font-size:12px;color:{brand["muted"]};line-height:1.5;">'
+            f'{t["expiry_hint"]}'
+            '</p>'
+            '</td></tr>'
+
+            # Footer
+            f'<tr><td style="background:#f9fdf9;border-top:1px solid {brand["green_light"]};'
+            'border-radius:0 0 16px 16px;padding:20px 28px;">'
+            f'<p style="margin:0;font-size:12px;color:{brand["muted"]};text-align:center;">'
+            f'{t["footer"]} <strong style="color:{brand["navy"]};">{brand_name}</strong>'
+            '</p>'
+            '</td></tr>'
+
+            '</table></td></tr></table></body></html>'
+        )
+
+        return {
+            'subject': subject,
+            'body_text': body_text,
+            'body_html': body_html,
+        }
+
+
     def invite_user_funnel(self,**kwargs):
         bridge = {}
         result = {}
@@ -1902,16 +2197,19 @@ class AuthController:
             bridge['teamdoc'] = response_1a['document']
 
 
-        #1b. Get Sender document
-
+        #1b. Get Sender document (optional — email copy works without a name)
         response_1b = self.get_entity(
             'user',
             user_id=kwargs['sender_id']
         )
-        if not response_1b['success']:
-            return response_1b
-        else:
+        if response_1b['success']:
             bridge['senderdoc'] = response_1b['document']
+        else:
+            self.logger.debug(
+                'Invite funnel: sender user entity not found for %s; using neutral email copy',
+                kwargs.get('sender_id'),
+            )
+            bridge['senderdoc'] = {}
         
 
 
@@ -1966,24 +2264,34 @@ class AuthController:
 
         #4. Send email to invite recipient
 
-        invite_sender = (self.config.get('SES_INVITE_SENDER') or '').strip() or 'noreply@travelwithnoma.com'
+        invite_sender = (
+            (self.config.get('INVITE_FROM') or '').strip()
+            or (self.config.get('SES_INVITE_SENDER') or '').strip()
+            or 'Noma <noreply@travelwithnoma.com>'
+        )
+
+        sender_first = (bridge['senderdoc'].get('name') or '').strip()
+        sender_last = (bridge['senderdoc'].get('slot_a') or '').strip()
+        sender_full = (sender_first + ' ' + sender_last).strip()
+        invite_url = (
+            BASE_URL + '/invite?code=' + rel_data['hash']
+            + '&email=' + kwargs['email']
+        )
+        email_payload = self._build_invite_email(
+            sender_name=sender_full,
+            portfolio_name=bridge['portfoliodoc'].get('name', ''),
+            team_name=bridge['teamdoc'].get('name', ''),
+            code=rel_data['hash'],
+            invite_url=invite_url,
+            brand_name=WL_NAME,
+            locale=kwargs.get('locale', 'en'),
+        )
         response_4 = self.AUM.send_email(
             sender=invite_sender,
             recipient=kwargs['email'],
-            subject='You have been invited to team '+bridge['portfoliodoc']['name']+'/'+ bridge['teamdoc']['name'],
-            body_text=
-                'You have been invited by '+ bridge['senderdoc']['name']+' '+bridge['senderdoc']['slot_a']+' to team '+ bridge['portfoliodoc']['name']+'/'+ bridge['teamdoc']['name'] +
-                '. Your invite code is: '+
-                rel_data['hash']+
-                '. Follow this link: '+BASE_URL+'/invite?code='+
-                rel_data['hash']+' .' ,
-            body_html='<html><body>'+
-                        '<h1>Hello from '+WL_NAME+'</h1>'+
-                        '<h2>You have been invited by '+ bridge['senderdoc']['name']+' '+bridge['senderdoc']['slot_a']+' to team '+ bridge['portfoliodoc']['name']+'/'+ bridge['teamdoc']['name'] +
-                        '<div>Your invite code is: '+rel_data['hash']+'</div>'+
-                        '<div>Follow this link:</div>'+
-                        '<div>'+BASE_URL+'/invite?code='+rel_data['hash']+'&email='+kwargs['email']+'</div>' 
-                      '</body></html>'
+            subject=email_payload['subject'],
+            body_text=email_payload['body_text'],
+            body_html=email_payload['body_html'],
         )
         response_4['message'] = 'Sent invite to team '+kwargs['team_id']+' via email to '+kwargs['email'] 
         
