@@ -18,7 +18,7 @@ setup(
         "PyJWT==2.10.1",
         "Requests==2.32.3",
         "validate_email==1.3",
-        "openai==1.65.2",
+        "openai==1.109.1",
     ],
     extras_require={
         "flask": [
