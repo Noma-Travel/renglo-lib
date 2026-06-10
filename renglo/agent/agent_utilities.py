@@ -213,7 +213,9 @@ class AgentUtilities:
             update
         )
 
-        if 'success' not in response:
+        # `success` must be present AND truthy: a failed put_item (e.g. the
+        # DynamoDB 400KB item limit) comes back as {'success': False, ...}.
+        if not (isinstance(response, dict) and response.get('success')):
             return {'success': False, 'action': action, 'input': update, 'output': response}
 
         return {'success': True, 'action': action, 'input': update, 'output': response}
@@ -749,10 +751,16 @@ class AgentUtilities:
 
             # Sanitize the entire workspace object to convert Decimals before updating
             sanitized_workspace = self.sanitize(workspace)
-            self.update_workspace_document(
+            update_result = self.update_workspace_document(
                 sanitized_workspace,
                 workspace['_id']
             )
+            if not (isinstance(update_result, dict) and update_result.get('success')):
+                # e.g. DynamoDB 400KB item limit — without this check the
+                # failure is invisible and callers believe the write landed.
+                detail = update_result.get('output') if isinstance(update_result, dict) else update_result
+                _logger_workspace.error("workspace_update_failed | %s", str(detail)[:500])
+                return False
             djson("workspace.json", workspace)
             return True
 
