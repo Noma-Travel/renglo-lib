@@ -1355,9 +1355,124 @@ class AuthController:
 
     
     def generate_invite_hash(self,email,ttl):
-
-        string_to_hash = email+SECRET_KEY+str(ttl)
+        secret_key = (self.config.get('SECRET_KEY') or '').strip()
+        if not secret_key:
+            secret_key = globals().get('SECRET_KEY', '')
+        string_to_hash = email + secret_key + str(ttl)
         return self.generate_numeric_hash(string_to_hash,6)
+
+    def _split_invitee_name(self, full_name, email):
+        """Split a full name into Cognito given_name / family_name parts."""
+        parts = full_name.strip().split() if full_name else []
+        if len(parts) >= 2:
+            return parts[0], ' '.join(parts[1:])
+        if parts:
+            return parts[0], ''
+        local_part = (email or '').split('@')[0] or 'User'
+        return local_part, ''
+
+    def _lookup_invitee_name(self, email, team_id):
+        """Resolve invitee display name from pending noma_attendant records."""
+        from renglo.data.data_controller import DataController
+
+        portfolio_id = None
+        team_portfolio = self.list_rel('team:portfolio', team_id=team_id)
+        items = (team_portfolio.get('document') or {}).get('items') or []
+        if team_portfolio.get('success') and items:
+            portfolio_id = items[0].get('rel')
+
+        if not portfolio_id:
+            return None
+
+        dac = DataController(config=self.config)
+        org_resp = self.list_rel('team:org', team_id=team_id)
+        org_items = (org_resp.get('document') or {}).get('items') or []
+        org_ids = [item.get('rel') for item in org_items if item.get('rel')]
+
+        normalized_email = email.lower().strip()
+        for org_id in org_ids:
+            try:
+                resp = dac.get_a_b(portfolio_id, org_id, 'noma_attendants', limit=1000)
+                for attendant in (resp.get('items') or []):
+                    attendant_email = (attendant.get('email') or '').lower().strip()
+                    if attendant_email == normalized_email:
+                        name = (attendant.get('name') or '').strip()
+                        if name:
+                            return name
+            except Exception as exc:
+                self.logger.debug('Invite name lookup failed for org %s: %s', org_id, exc)
+                continue
+
+        return None
+
+    def _validate_invite_code(self, email, code):
+        """Validate invite email/code pair. Returns success dict with hash and team_id."""
+        index = 'irn:rel:email:hash:ttl:*:*:*'
+        prefix = email + ':' + code
+        response = self.AUM.list_rel_prefix(index, prefix)
+
+        if not (response.get('success') and response.get('document')):
+            return {
+                'success': False,
+                'message': 'Invitation is invalid ',
+                'status': 404,
+            }
+
+        documents = response['document']
+        if not documents:
+            return {
+                'success': False,
+                'message': 'Invitation is invalid ',
+                'status': 404,
+            }
+
+        rel_email, rel_hash, ttl = documents[0]['rel'].split(':')
+        if str(self.generate_ttl(0)) > str(ttl):
+            return {
+                'success': False,
+                'message': 'Invitation is expired',
+                'status': 410,
+            }
+
+        if code != self.generate_invite_hash(rel_email, ttl):
+            return {
+                'success': False,
+                'message': 'Invitation is invalid',
+                'status': 400,
+            }
+
+        team_id = None
+        team_rel = self.list_rel('hash:team', hash=rel_hash)
+        team_items = (team_rel.get('document') or {}).get('items') or []
+        if team_rel.get('success') and team_items:
+            team_id = team_items[0].get('rel')
+
+        invitee_name = self._lookup_invitee_name(email, team_id) if team_id else None
+        first, last = self._split_invitee_name(invitee_name or '', email)
+
+        return {
+            'success': True,
+            'message': 'Invitation is valid',
+            'status': 200,
+            'document': {
+                'email': rel_email,
+                'hash': rel_hash,
+                'team_id': team_id,
+                'name': invitee_name or '',
+                'first': first,
+                'last': last,
+            },
+        }
+
+    def get_invite_preview(self, email, code):
+        """Public invite preview for the accept-invite page (no auth required)."""
+        if not email or not code:
+            return {
+                'success': False,
+                'message': 'Missing attributes',
+                'status': 400,
+            }
+        return self._validate_invite_code(email.strip(), code.strip())
     
 
 
@@ -2327,60 +2442,40 @@ class AuthController:
 
 
         #1. Check minimum requirements
-        required_keys = ['code','email','first','last','pass'] 
+        required_keys = ['code', 'email', 'pass']
         if not all(key in kwargs for key in required_keys):
-            return{
-            "success":False, 
-            "message": "Missing attributes", 
-            "status" :400
+            return {
+                "success": False,
+                "message": "Missing attributes",
+                "status": 400,
             }
-        
 
         #1b. Check if this user already exists in the pool. Cancel funnel if True
         response_1b = self.AUM.check_user_by_email(kwargs['email'])
         if response_1b['success']:
             return {
-                "success":False, 
+                "success": False,
                 "message": "User already exists, sign in to access",
-                "status" : 404
+                "status": 404,
             }
 
-
         #2. Verify that the invitation code is valid
-        #Input: email, code
-        index = 'irn:rel:email:hash:ttl:*:*:*'
-        prefix = kwargs['email']+':'+kwargs['code']
-        #We need to use a prefix search on the sort key as we don't have the TTL
-        response_2 = self.AUM.list_rel_prefix(index,prefix) 
-
+        response_2 = self._validate_invite_code(kwargs['email'], kwargs['code'])
         self.logger.debug('Step 2: Verifying that the invitation is valid ')
         self.logger.debug(response_2)
 
-        # Invitation was found
-        if response_2['success'] and len(response_2['document'])>0 :
-            email,hash,ttl = response_2['document'][0]['rel'].split(":")
-        else:
-            return{
-                "success":False, 
-                "message": "Invitation is invalid ", 
-                "status" :404 #404:Not found
-                } 
+        if not response_2['success']:
+            return response_2
 
-        # TTL has not expired
-        if  str(self.generate_ttl(0)) > str(ttl):
-            return{
-                "success":False, 
-                "message": "Invitation is expired", 
-                "status" :410 #410:Gone
-                }  
-        
-        # Provided code is valid
-        if kwargs['code'] != self.generate_invite_hash(email,ttl):
-             return{
-                "success":False, 
-                "message": "Invitation is invalid", 
-                "status" :400 #400:Bad Request
-                }
+        invite_doc = response_2['document']
+        email = invite_doc['email']
+        hash = invite_doc['hash']
+        if not kwargs.get('first') or not kwargs.get('last'):
+            kwargs['first'] = kwargs.get('first') or invite_doc.get('first') or ''
+            kwargs['last'] = kwargs.get('last') or invite_doc.get('last') or ''
+        if not kwargs['first']:
+            kwargs['first'], kwargs['last'] = self._split_invitee_name('', kwargs['email'])
+
         transaction.append(response_2)
 
  
@@ -2455,7 +2550,12 @@ class AuthController:
                         self.logger.debug('Team for invitation:('+hash+') was not found')
                         continue
 
-                    team_id = response_5b['document']['items'][0]['rel']
+                    team_items = (response_5b.get('document') or {}).get('items') or []
+                    if not team_items:
+                        self.logger.debug('Team for invitation:('+hash+') returned no items')
+                        continue
+
+                    team_id = team_items[0]['rel']
                     teams_to_add.append(team_id)
 
         else:
