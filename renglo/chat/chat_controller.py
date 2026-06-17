@@ -143,6 +143,90 @@ class ChatController:
 
         return response
 
+    def move_thread(self, portfolio, org, entity_type, old_entity_id, new_entity_id, thread_id):
+        """
+        Re-home a chat thread (thread row + its turns + workspaces) from
+        ``old_entity_id`` to ``new_entity_id`` — e.g. the dashboard
+        ``{org}-travel-chat`` conversation that birthed a trip is moved to
+        ``{org}-{tripId}`` so the trip's own chat shows the history instead of
+        an empty thread.
+
+        Non-destructive: every row is copied under the new entity sort key and
+        the *source* thread is merely deactivated (so the old entity starts a
+        fresh conversation). The original turn/workspace rows are left in place
+        as harmless, unreferenced cruft — no delete, no risk of half-migration.
+
+        Idempotent: if the thread already exists under ``new_entity_id`` it is a
+        no-op, so retries / double-fires are safe.
+
+        Only ``entity_index`` (the DynamoDB sort key) carries the entity id, so
+        re-keying is a prefix rewrite; ``index`` depends on entity_type, which
+        does not change.
+        """
+        try:
+            if not all([portfolio, org, entity_type, old_entity_id, new_entity_id, thread_id]):
+                return {"success": False, "message": "Missing required parameters"}
+            if old_entity_id == new_entity_id:
+                return {"success": True, "message": "Same entity, nothing to move", "moved": 0}
+
+            # Idempotency: skip if the thread is already homed under the new entity.
+            existing = self.list_threads(portfolio, org, entity_type, new_entity_id)
+            for t in (existing.get('items') or []):
+                if t.get('_id') == thread_id:
+                    return {"success": True, "message": "Already migrated", "moved": 0}
+
+            old_prefix = f"{old_entity_id}/{thread_id}"
+            new_prefix = f"{new_entity_id}/{thread_id}"
+
+            thread_index = f"irn:chat:{portfolio}:{org}:{entity_type}/thread:*/*"
+            turn_index = f"irn:chat:{portfolio}:{org}:{entity_type}/thread/time/turn:*/*/*/*"
+            workspace_index = f"irn:chat:{portfolio}:{org}:{entity_type}/thread/time/workspace:*/*/*/*"
+
+            moved = 0
+
+            # Turns + workspaces: copy each row under the new sort key.
+            for idx in (turn_index, workspace_index):
+                resp = self.CHM.query_chat(idx, old_prefix, limit=1000, sort='asc')
+                for row in (resp.get('items') or []):
+                    new_row = copy.deepcopy(dict(row))
+                    new_row['entity_index'] = str(row.get('entity_index', '')).replace(
+                        old_prefix, new_prefix, 1
+                    )
+                    ctx = new_row.get('context')
+                    if isinstance(ctx, dict) and ctx.get('entity_id') == old_entity_id:
+                        ctx['entity_id'] = new_entity_id
+                    self.CHM.create_chat(new_row)
+                    moved += 1
+
+            # Thread row: copy under the new entity, then deactivate the source.
+            thread_resp = self.CHM.query_chat(thread_index, old_prefix, limit=1000, sort='asc')
+            for row in (thread_resp.get('items') or []):
+                if row.get('_id') != thread_id:
+                    continue
+                new_row = copy.deepcopy(dict(row))
+                new_row['entity_index'] = str(row.get('entity_index', '')).replace(
+                    old_prefix, new_prefix, 1
+                )
+                new_row['entity_id'] = new_entity_id
+                new_row['is_active'] = True
+                self.CHM.create_chat(new_row)
+                moved += 1
+
+                old_row = copy.deepcopy(dict(row))
+                old_row['is_active'] = False
+                self.CHM.update_chat(old_row)
+
+            return {
+                "success": True,
+                "moved": moved,
+                "thread_id": thread_id,
+                "from": old_entity_id,
+                "to": new_entity_id,
+            }
+        except Exception as e:
+            current_app.logger.error(f"Error in move_thread: {str(e)}")
+            return {"success": False, "message": f"Error moving thread: {str(e)}", "status": 500}
+
     # TURNS
     # There is a document per turn in the database
     # Every turn document contains a list of messages that belong to that turn
