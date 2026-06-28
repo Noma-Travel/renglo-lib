@@ -61,12 +61,22 @@ class ChatController:
 
         current_app.logger.debug('Getting user')
 
-        if "cognito:username" in current_cognito_jwt:
-            # IdToken was used
-            user_id = create_md5_hash(current_cognito_jwt["cognito:username"],9)
-        else:
-            # AccessToken was used
-            user_id = create_md5_hash(current_cognito_jwt["username"],9)
+        # Machine/webhook calls (e.g. the WhatsApp inbound /public route) carry
+        # no Cognito JWT, so current_cognito_jwt resolves to None. Degrade to
+        # None instead of crashing on `in None` ("argument of type 'NoneType' is
+        # not iterable"). Callers that need an author for these paths should pass
+        # public_user explicitly (see create_workspace).
+        try:
+            if not current_cognito_jwt:
+                return None
+            if "cognito:username" in current_cognito_jwt:
+                # IdToken was used
+                user_id = create_md5_hash(current_cognito_jwt["cognito:username"],9)
+            else:
+                # AccessToken was used
+                user_id = create_md5_hash(current_cognito_jwt["username"],9)
+        except (TypeError, KeyError, RuntimeError):
+            return None
 
         current_app.logger.debug('User Id: %s', user_id)
 
