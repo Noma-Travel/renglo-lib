@@ -57,6 +57,11 @@ class AgentUtilities:
         self.thread = thread
         self.chat_id = None
         self.connection_id = connection_id
+        # Token usage of the most recent self.llm() call, as a plain dict
+        # {"prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"}
+        # or None if unavailable. Additive/optional — existing callers that only
+        # read the return value of llm() are unaffected.
+        self.last_llm_usage = None
 
         # OpenAI Client
         try:
@@ -816,9 +821,34 @@ class AgentUtilities:
             resp = response.choices[0].message
             _logger_llm.info("llm result returned successfully and has_tool_calls=%s", bool(resp.tool_calls))
             djson("llm_last_response.json", {"role": resp.role, "content": resp.content, "tool_calls": [{"id": tc.id, "function": {"name": tc.function.name}} for tc in (resp.tool_calls or [])]})
+
+            # Capture token usage for context-engineering instrumentation
+            # (F0). Best-effort: never let usage parsing break the call —
+            # `response.usage` is populated by the Chat Completions API but
+            # we don't want a shape change there to take the agent down.
+            try:
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    cached = None
+                    details = getattr(usage, "prompt_tokens_details", None)
+                    if details is not None:
+                        cached = getattr(details, "cached_tokens", None)
+                    self.last_llm_usage = {
+                        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                        "completion_tokens": getattr(usage, "completion_tokens", None),
+                        "total_tokens": getattr(usage, "total_tokens", None),
+                        "cached_tokens": cached,
+                    }
+                else:
+                    self.last_llm_usage = None
+            except Exception as usage_exc:
+                self.last_llm_usage = None
+                _logger_llm.debug("llm usage capture failed | %s", usage_exc)
+
             return resp
 
         except Exception as e:
+            self.last_llm_usage = None
             _logger_llm.error("llm error model=%s %s", params.get('model', ''), e)
             return False
 
