@@ -8,10 +8,29 @@ import traceback
 
 _logger_schd = logging.getLogger("agent.schd")
 
+
+def _unload_handlers_enabled():
+    """
+    Whether handler modules should be removed from sys.modules (+ gc.collect())
+    after each run.
+
+    Controlled by SCHD_UNLOAD_HANDLERS ("1"/"true"/"on" to enable). When unset,
+    defaults to ON only inside AWS Lambda (memory-constrained, single-request
+    containers) and OFF everywhere else: in a long-running server, unloading on
+    every call forces a full module reimport per request and the gc.collect()
+    pause blocks ALL concurrent requests via the GIL.
+    """
+    raw = os.environ.get('SCHD_UNLOAD_HANDLERS')
+    if raw is not None:
+        return str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
+    return bool(os.environ.get('AWS_LAMBDA_FUNCTION_NAME'))
+
+
 class SchdLoader:
 
     def __init__(self, module_path="handlers"):
         self.module_path = module_path
+        self.unload_handlers = _unload_handlers_enabled()
 
 
 
@@ -199,8 +218,11 @@ class SchdLoader:
                     return {'success':False,'action':func_name,'error':error,'status':500}
 
 
-            if runtime_loaded_class:
-                # Unload module to free memory
+            if runtime_loaded_class and self.unload_handlers:
+                # Unload module to free memory (Lambda / opt-in only; see
+                # _unload_handlers_enabled). importlib.import_module reuses the
+                # sys.modules entry, so skipping this makes subsequent calls
+                # reuse the already-imported module instead of reimporting.
                 del instance
                 if actual_module_name in sys.modules:
                     del sys.modules[actual_module_name]
