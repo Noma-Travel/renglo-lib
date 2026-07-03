@@ -2382,7 +2382,7 @@ class AuthController:
         invite_sender = (
             (self.config.get('INVITE_FROM') or '').strip()
             or (self.config.get('SES_INVITE_SENDER') or '').strip()
-            or 'Noma <noreply@travelwithnoma.com>'
+            or 'Noma <noreply@email.travelwithnoma.com>'
         )
 
         sender_first = (bridge['senderdoc'].get('name') or '').strip()
