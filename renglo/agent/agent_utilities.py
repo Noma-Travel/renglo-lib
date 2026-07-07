@@ -3,6 +3,8 @@ from renglo.docs.docs_controller import DocsController
 from renglo.chat.chat_controller import ChatController
 from renglo.schd.schd_controller import SchdController
 from renglo.agent.websocket_client import WebSocketClient
+from renglo.agent.llm.model_config import model_for
+from renglo.agent.llm.client import get_client
 
 from langfuse.openai import OpenAI
 
@@ -68,8 +70,8 @@ class AgentUtilities:
             self.AI_1 = None
             self.AI_2 = None
 
-        self.AI_1_MODEL = "gpt-3.5-turbo"  # Baseline model. Good for multi-step chats
-        self.AI_2_MODEL = "gpt-4o-mini"    # This model is not very smart
+        self.AI_1_MODEL = model_for("baseline")
+        self.AI_2_MODEL = model_for("fast")
 
         # Initialize controllers
         self.DAC = DataController(config=self.config)
@@ -811,7 +813,7 @@ class AgentUtilities:
 
             # AI_1 is gpt-3.5-turbo which doesn't support structured outputs. AI_2 uses gpt-4o-mini which does.
             # response = self.AI_1.chat.completions.create(**params)
-            response = self.AI_2.chat.completions.create(**params)
+            response = get_client(params['model']).chat.completions.create(**params)
 
             resp = response.choices[0].message
             _logger_llm.info("llm result returned successfully and has_tool_calls=%s", bool(resp.tool_calls))

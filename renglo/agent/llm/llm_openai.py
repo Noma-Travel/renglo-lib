@@ -1,5 +1,7 @@
 from decimal import Decimal
 from langfuse.openai import OpenAI
+from renglo.agent.llm.model_config import model_for
+from renglo.agent.llm.client import get_client
 import json
 import re
 
@@ -25,9 +27,8 @@ class LLMOpenAI:
             openai_client = None
             
         self.AI_1 = openai_client
-        #self.AI_1_MODEL = "gpt-4" // This model does not support json_object response format
-        self.AI_1_MODEL = "gpt-3.5-turbo" # Baseline model. Good for multi-step chats
-        self.AI_2_MODEL = "gpt-4o-mini" # This model is not very smart
+        self.AI_1_MODEL = model_for("baseline")
+        self.AI_2_MODEL = model_for("fast")
         
     
     def call(self, prompt):
@@ -50,7 +51,7 @@ class LLMOpenAI:
                 
             #print(f'AS IS LLM INPUT:{params}')
                 
-            response = self.AI_1.chat.completions.create(**params)
+            response = get_client(params['model']).chat.completions.create(**params)
             print("[API] response=openai_chat_completion | status=200")
 
             #print(f'AS IS LLM RESPONSE:{response}')
