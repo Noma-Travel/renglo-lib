@@ -8,6 +8,8 @@ from botocore.exceptions import BotoCoreError, ClientError
 from decimal import Decimal
 import json
 
+from renglo.dynamodb_resource import get_dynamodb_resource
+
 class DecimalEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Decimal):
@@ -28,7 +30,7 @@ class SessionModel:
         self.config = config or {}
         
         region = self.config.get('AWS_REGION', 'us-east-1')
-        self.dynamodb = boto3.resource('dynamodb', region_name=region)
+        self.dynamodb = get_dynamodb_resource(region)
         
         table_name = self.config.get('DYNAMODB_SESSION_TABLE', 'default_session_table')
         self.session_table = self.dynamodb.Table(table_name)

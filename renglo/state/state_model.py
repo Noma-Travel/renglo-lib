@@ -6,12 +6,14 @@ from datetime import datetime
 import uuid
 from decimal import Decimal
 
+from renglo.dynamodb_resource import get_dynamodb_resource
+
 
 class StateModel:
 
     def __init__(self, config=None, tid=False, ip=False):
         self.config = config or {}
-        self.dynamodb = boto3.resource('dynamodb', region_name='us-east-1')  # Adjust region if needed
+        self.dynamodb = get_dynamodb_resource("us-east-1")
         table_name = self.config.get('DYNAMODB_BLUEPRINT_TABLE', 'default_blueprint_table')
         self.state_table = self.dynamodb.Table(table_name)
             

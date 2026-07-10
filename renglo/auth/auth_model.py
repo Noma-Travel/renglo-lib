@@ -6,6 +6,8 @@ import uuid
 from decimal import Decimal
 import requests
 
+from renglo.dynamodb_resource import get_dynamodb_resource
+
 logger = logging.getLogger(__name__)
 
 RESEND_API_URL = "https://api.resend.com/emails"
@@ -18,7 +20,7 @@ class AuthModel:
         self.config = config or {}
         
         #Dynamo
-        self.dynamodb = boto3.resource('dynamodb')
+        self.dynamodb = get_dynamodb_resource()
         entity_table_name = self.config.get('DYNAMODB_ENTITY_TABLE', 'default_entity_table')
         rel_table_name = self.config.get('DYNAMODB_REL_TABLE', 'default_rel_table')
         self.entity_table = self.dynamodb.Table(entity_table_name)

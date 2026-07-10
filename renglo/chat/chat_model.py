@@ -9,6 +9,8 @@ from decimal import Decimal
 import json
 import logging
 
+from renglo.dynamodb_resource import get_dynamodb_resource
+
 _logger_workspace = logging.getLogger("agent.workspace")
 
 class DecimalEncoder(json.JSONEncoder):
@@ -30,7 +32,7 @@ class ChatModel:
         """
         self.config = config or {}
 
-        self.dynamodb = boto3.resource('dynamodb', region_name='us-east-1')  # Adjust region if needed
+        self.dynamodb = get_dynamodb_resource("us-east-1")
 
         table_name = self.config.get('DYNAMODB_CHAT_TABLE', 'default_chat_table')
         self.chat_table = self.dynamodb.Table(table_name)
