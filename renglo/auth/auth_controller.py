@@ -1824,6 +1824,15 @@ class AuthController:
                 team_id = self._pick_user_team_in_portfolio(
                     user_id=user_id, portfolio_id=portfolio_id
                 )
+                if not team_id:
+                    # Portfolios are expected to always have a team (normally
+                    # bootstrapped by create_portfolio_funnel), but some
+                    # (e.g. accessed by a global admin, or created before
+                    # that invariant existed) don't. Rather than failing org
+                    # provisioning because of it, bootstrap a default team.
+                    team_id = self._ensure_default_team_for_portfolio(
+                        portfolio_id=portfolio_id, user_id=user_id
+                    )
 
             if portfolio_id and org_id and team_id:
                 onboarding = NomaOnboardings()
@@ -1896,6 +1905,54 @@ class AuthController:
         self.logger.debug(result)
         return result
 
+    def _ensure_default_team_for_portfolio(self, portfolio_id: str, user_id: str):
+        """
+        Best-effort bootstrap of a default team for portfolios that somehow
+        have none resolvable for this user (e.g. accessed by a global admin,
+        or a portfolio created outside create_portfolio_funnel). Mirrors the
+        'Admin' team create_portfolio_funnel normally creates, so
+        create_org_funnel doesn't have to skip tool provisioning for lack of
+        a team to hang the org off of.
+        """
+        if not portfolio_id or not user_id:
+            return None
+
+        try:
+            team_kwargs = {
+                'name': 'Admin',
+                'about': 'This team enables its users to change portfolio settings.',
+                'portfolio_id': portfolio_id,
+                'user_id': user_id,
+            }
+            response_team = self.create_entity('team', **team_kwargs)
+            if not response_team.get('success'):
+                self.logger.warning(
+                    f"_ensure_default_team_for_portfolio: could not create team | {response_team}"
+                )
+                return None
+
+            team_id = response_team['document']['_id']
+
+            response_rel_1 = self.create_rel(
+                'team:portfolio', team_id=team_id, portfolio_id=portfolio_id
+            )
+            if not response_rel_1.get('success'):
+                self.logger.warning(
+                    f"_ensure_default_team_for_portfolio: could not link team:portfolio | {response_rel_1}"
+                )
+                return None
+
+            self.create_rel('team:user', team_id=team_id, user_id=user_id)
+            self.create_rel('user:team', team_id=team_id, user_id=user_id)
+
+            self.logger.info(
+                "_ensure_default_team_for_portfolio: bootstrapped team "
+                f"{team_id} for portfolio {portfolio_id}"
+            )
+            return team_id
+        except Exception:
+            self.logger.exception("_ensure_default_team_for_portfolio failed")
+            return None
 
     def _pick_user_team_in_portfolio(self, user_id: str, portfolio_id: str):
         """
@@ -2385,7 +2442,7 @@ class AuthController:
         invite_sender = (
             (self.config.get('INVITE_FROM') or '').strip()
             or (self.config.get('SES_INVITE_SENDER') or '').strip()
-            or 'Noma <noreply@travelwithnoma.com>'
+            or 'Noma <noreply@email.travelwithnoma.com>'
         )
 
         sender_first = str(bridge['senderdoc'].get('name') or '').strip()
@@ -2628,22 +2685,90 @@ class AuthController:
 
     
 
-    #NOT IMPLEMENTED
     def remove_org_funnel(self,**kwargs):
-        bridge = {}
         result = {}
         transaction = []
 
         self.logger.debug('Initiating DELETE ORG FUNNEL')
 
+        #0. Check minimum requirements
+        required_keys = ['portfolio_id','org_id']
+        if not all(key in kwargs for key in required_keys):
+            return{
+            "success":False, 
+            "message": "Missing attributes", 
+            "status" :400
+            }
 
-        # 1. Create a copy of org entity and put it in irn:deleted_entity:org
+        #1. Retrieve org document to be unlinked
+        response_1a = self.get_entity(
+                    'org',
+                    portfolio_id=kwargs['portfolio_id'],
+                    org_id=kwargs['org_id']
+                    )
 
-        # 2. Create a copy of team:org rel and put it in irn:deleted_rel:team:org
+        if not response_1a['success']:
+            return{
+            "success":False, 
+            "message": "Org not found", 
+            "status" :400
+            }
 
-        # 3. Remove original entity and rel documents  from steps 1-2
+        orgdoc = response_1a['document']
 
-  
+        #2. Remove team:org and team/tool:org rels referencing this org.
+        # There is no reverse (org->team) index, so we walk every team in the
+        # portfolio and drop the rels that point at this org, if any exist.
+        teams_index = 'irn:entity:portfolio/team:' + kwargs['portfolio_id'] + ':*'
+        teams_resp = self.AUM.list_entity(teams_index, limit=100)
+        team_items = (teams_resp or {}).get('document', {}).get('items', []) or []
+
+        for team in team_items:
+            team_id = team.get('_id')
+            if not team_id:
+                continue
+
+            #2a. Remove team:org rel, if it exists
+            rel_check = self.get_rel('team:org', team_id=team_id, org_id=kwargs['org_id'])
+            if rel_check and rel_check.get('success'):
+                response_2a = self.delete_rel('team:org', team_id=team_id, org_id=kwargs['org_id'])
+                if not response_2a['success']:
+                    response_2a['message'] = 'Could not remove Team-Org relationship'
+                    return response_2a
+                transaction.append(response_2a)
+
+            #2b. Remove team/tool:org rels for every tool this team has, if any exist
+            tool_rels = self.list_rel('team:tool', team_id=team_id)
+            tool_items = (tool_rels or {}).get('document', {}).get('items', []) or []
+            for tool_item in tool_items:
+                tool_id = tool_item.get('rel')
+                if not tool_id:
+                    continue
+                rel_check_2 = self.get_rel(
+                        'team/tool:org',
+                        team_id=team_id,
+                        tool_id=tool_id,
+                        org_id=kwargs['org_id']
+                        )
+                if rel_check_2 and rel_check_2.get('success'):
+                    response_2b = self.delete_rel(
+                            'team/tool:org',
+                            team_id=team_id,
+                            tool_id=tool_id,
+                            org_id=kwargs['org_id']
+                            )
+                    if not response_2b['success']:
+                        response_2b['message'] = 'Could not remove Team/Tool-Org relationship'
+                        return response_2b
+                    transaction.append(response_2b)
+
+        #3. Unlink the org entity itself (soft delete, like remove_team_funnel)
+        response_3 = self.unlink_entity(**orgdoc)
+        if not response_3['success']:
+            response_3['message'] = 'Could not remove Org'
+            return response_3
+        transaction.append(response_3)
+
         #All went good, Summarize Transaction Success 
         self.logger.debug('End of Funnel ')
 
