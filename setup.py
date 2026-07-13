@@ -19,6 +19,7 @@ setup(
         "Requests==2.32.3",
         "validate_email==1.3",
         "openai==1.109.1",
+        "langfuse>=3.0,<5",
     ],
     extras_require={
         "flask": [

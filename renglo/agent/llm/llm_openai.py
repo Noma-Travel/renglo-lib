@@ -1,5 +1,5 @@
 from decimal import Decimal
-from openai import OpenAI
+from langfuse.openai import OpenAI
 import json
 import re
 

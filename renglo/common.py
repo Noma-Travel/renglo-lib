@@ -124,6 +124,13 @@ def load_config():
         'TOKENS_KMS_KEY_ID',
         # Invite / transactional email (auth_model.send_email, invite_user_funnel, invite_attendant)
         'INVITE_FROM', 'SES_INVITE_SENDER',
+        'CORS_ALLOWED_ORIGINS',
+        'AGENT_API_OUTPUT', 'AGENT_API_HANDLER',
+        'AGENT_LANGUAGE', 'NOMA_ROLE_ENFORCEMENT', 'NOMA_ROLE_ENFORCEMENT_ORGS',
+        'NOMA_E2E_SEED_ALLOWED', 'SYSTEM_ADMIN_EMAILS', 'SYSTEM_ADMIN_USER_IDS',
+        'SLACK_API_ERRORS_WEBHOOK_URL', 'SLACK_BOOKINGS_WEBHOOK_URL', 'SLACK_ACTIVE_TRAVELS_WEBHOOK_URL',
+        'CVC_BASE_URL', 'CVC_CLIENT_ID', 'CVC_CLIENT_SECRET', 'CVC_USERNAME', 'CVC_PASSWORD',
+        'ASAAS_API_KEY', 'ASAAS_BASE_URL',
     ]
 
     env_loaded_count = 0

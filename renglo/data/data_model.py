@@ -7,6 +7,7 @@ from datetime import datetime
 from flask import current_app, jsonify
 from renglo.auth.auth_controller import AuthController
 from renglo.blueprint.blueprint_controller import BlueprintController
+from renglo.dynamodb_resource import get_dynamodb_resource
 
 
 class DataModel:
@@ -17,7 +18,7 @@ class DataModel:
         self.AUC = AuthController(config=self.config, tid=tid, ip=ip)
         self.BPC = BlueprintController(config=self.config, tid=tid, ip=ip)
 
-        self.dynamodb = boto3.resource('dynamodb', region_name='us-east-1')  # Adjust region if needed
+        self.dynamodb = get_dynamodb_resource("us-east-1")
         table_name = self.config.get('DYNAMODB_RINGDATA_TABLE')
         if not table_name:
             raise ValueError("DYNAMODB_RINGDATA_TABLE configuration is required but not found")

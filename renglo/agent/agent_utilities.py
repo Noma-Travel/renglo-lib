@@ -4,7 +4,7 @@ from renglo.chat.chat_controller import ChatController
 from renglo.schd.schd_controller import SchdController
 from renglo.agent.websocket_client import WebSocketClient
 
-from openai import OpenAI
+from langfuse.openai import OpenAI
 
 import random
 import json
