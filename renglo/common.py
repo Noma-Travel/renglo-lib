@@ -131,6 +131,10 @@ def load_config():
         'SLACK_API_ERRORS_WEBHOOK_URL', 'SLACK_BOOKINGS_WEBHOOK_URL', 'SLACK_ACTIVE_TRAVELS_WEBHOOK_URL',
         'CVC_BASE_URL', 'CVC_CLIENT_ID', 'CVC_CLIENT_SECRET', 'CVC_USERNAME', 'CVC_PASSWORD',
         'ASAAS_API_KEY', 'ASAAS_BASE_URL',
+        # Flight-change negotiation agent (flight_change_react / flight_change_inbound)
+        'FLIGHT_CHANGE_PROVIDER_EMAIL', 'FLIGHT_CHANGE_EMAIL_OBSERVER',
+        'FLIGHT_CHANGE_EMAIL_FROM', 'FLIGHT_CHANGE_INBOUND_DOMAIN',
+        'FLIGHT_CHANGE_EMAIL_DRY_RUN', 'RESEND_WEBHOOK_SECRET',
     ]
 
     env_loaded_count = 0
