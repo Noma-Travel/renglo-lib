@@ -84,6 +84,105 @@ class ChatController:
 
     # THREADS
 
+    @staticmethod
+    def _truncate_thread_preview(raw, max_len=80):
+        clean = " ".join(str(raw or "").split()).strip()
+        if not clean:
+            return ""
+        if len(clean) > max_len:
+            return clean[: max_len - 3] + "..."
+        return clean
+
+    @classmethod
+    def _first_user_preview_from_turns(cls, turns):
+        """Best-effort label from the first user text in a turns payload."""
+        for turn in turns or []:
+            messages = turn.get("messages") or []
+            if isinstance(messages, str):
+                try:
+                    messages = json.loads(messages)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+            if not isinstance(messages, list):
+                continue
+            for msg in messages:
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("_type") in ("tool_rq", "tool_rs"):
+                    continue
+                out = msg.get("_out") if isinstance(msg.get("_out"), dict) else msg
+                if not isinstance(out, dict) or out.get("role") != "user":
+                    continue
+                content = out.get("content")
+                if isinstance(content, str) and content.strip():
+                    return cls._truncate_thread_preview(content)
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("text"):
+                            preview = cls._truncate_thread_preview(part.get("text"))
+                            if preview:
+                                return preview
+        return ""
+
+    def _enrich_untitled_thread_rows(self, portfolio, org, entity_type, items, max_enrich=20):
+        """Fill empty title/last_message from the thread's first user message.
+
+        Lazy-web turns live under ``{org}-{thread}``. Older empty rows never got
+        a title because enrichment on create_turn was added later — without this,
+        conversation pickers show a generic fallback for every thread.
+        Persists the preview so subsequent lists stay cheap.
+        """
+        enriched = 0
+        for item in items:
+            if enriched >= max_enrich:
+                break
+            if not isinstance(item, dict):
+                continue
+            if (item.get("title") or "").strip() or (item.get("last_message") or "").strip():
+                continue
+            thread_id = (item.get("_id") or "").strip()
+            if not thread_id or not org:
+                continue
+            conv_key = f"{org}-{thread_id}"
+            try:
+                turns_resp = self.list_turns(
+                    portfolio, org, entity_type, conv_key, thread_id, False
+                )
+                preview = self._first_user_preview_from_turns(
+                    (turns_resp or {}).get("items") or []
+                )
+                if not preview:
+                    continue
+                item["title"] = preview
+                item["last_message"] = preview
+                enriched += 1
+                # Persist under the SAME entity the row was listed from
+                # (user container {org}-u:{user}), not the conv-key.
+                row_entity = (item.get("entity_id") or "").strip()
+                if row_entity:
+                    try:
+                        self.update_thread_meta(
+                            portfolio,
+                            org,
+                            entity_type,
+                            row_entity,
+                            thread_id,
+                            fill_if_empty={"title": preview},
+                            last_message=preview,
+                            last_message_at=str(datetime.now().timestamp()),
+                        )
+                    except Exception as persist_exc:  # noqa: BLE001
+                        current_app.logger.warning(
+                            "list_threads title persist failed | %s", persist_exc
+                        )
+            except Exception as enrich_exc:  # noqa: BLE001
+                current_app.logger.warning(
+                    "list_threads title enrich failed | thread=%s | %s",
+                    thread_id,
+                    enrich_exc,
+                )
+        return items
+
     def list_threads(self,portfolio,org,entity_type,entity_id):
 
         #TO-DO : Check is this user has access to this tool before returning threads.
@@ -107,7 +206,14 @@ class ChatController:
                 except (TypeError, ValueError):
                     return 0.0
 
-            response['items'] = sorted(items, key=_thread_time, reverse=True)
+            sorted_items = sorted(items, key=_thread_time, reverse=True)
+            # Only enrich conversation-history containers (user-scoped). Trip-
+            # keyed lists don't need picker labels and would waste reads.
+            if isinstance(entity_id, str) and "-u:" in entity_id:
+                sorted_items = self._enrich_untitled_thread_rows(
+                    portfolio, org, entity_type, sorted_items
+                )
+            response['items'] = sorted_items
 
         return response
 
@@ -147,11 +253,120 @@ class ChatController:
             'language' : 'EN',
             'index' : index,
             '_id': thread_id,
+            # Display metadata for conversation-history UIs. Populated later via
+            # update_thread_meta (e.g. when the thread's trip is born, or on each
+            # turn); defaulted here so rows have a stable shape and reads never
+            # KeyError on older rows.
+            'title' : '',
+            'trip_id' : '',
+            'last_message' : '',
+            'last_message_at' : '',
         }
 
         response = self.CHM.create_chat(data)
 
         return response
+
+    def delete_thread(self, portfolio, org, entity_type, entity_id, thread_id):
+        """Remove a thread from the conversation list.
+
+        Deletes only the thread *metadata* row under the user/entity container
+        so it disappears from ``list_threads``. Turns and workspaces under the
+        message entity (``{org}-{thread}``) are left in place — same
+        non-destructive spirit as ``move_thread`` — and any linked trip document
+        is untouched (deleting a conversation must never delete a trip).
+        Idempotent: already-missing threads return success.
+        """
+        try:
+            if not all([portfolio, org, entity_type, entity_id, thread_id]):
+                return {"success": False, "message": "Missing required parameters"}
+
+            thread_index = f"irn:chat:{portfolio}:{org}:{entity_type}/thread:*/*"
+            # New rows: entity_index == "{entity_id}/{thread_id}". Legacy rows
+            # used entity_index == entity_id — begins_with(entity_id) covers both.
+            resp = self.CHM.query_chat(thread_index, str(entity_id), limit=1000, sort='asc')
+            deleted = 0
+            for row in (resp.get('items') or []):
+                if row.get('_id') != thread_id:
+                    continue
+                if not row.get('index') or row.get('entity_index') is None:
+                    continue
+                result = self.CHM.delete_chat(row)
+                if result.get('success'):
+                    deleted += 1
+                else:
+                    current_app.logger.error(
+                        "delete_thread row failed | thread=%s | %s",
+                        thread_id,
+                        result.get('message'),
+                    )
+                    return {
+                        "success": False,
+                        "message": result.get('message') or "Delete failed",
+                        "thread_id": thread_id,
+                        "deleted": deleted,
+                        "status": result.get('status') or 500,
+                    }
+
+            return {
+                "success": True,
+                "thread_id": thread_id,
+                "deleted": deleted,
+                "message": "Thread deleted" if deleted else "Thread not found",
+            }
+        except Exception as e:
+            current_app.logger.error(f"Error in delete_thread: {str(e)}")
+            return {
+                "success": False,
+                "message": f"Error deleting thread: {str(e)}",
+                "status": 500,
+            }
+
+    def update_thread_meta(
+        self, portfolio, org, entity_type, entity_id, thread_id,
+        fill_if_empty=None, **fields,
+    ):
+        """Patch display metadata (title / trip_id / last_message / ...) on a
+        thread row, leaving every other field intact.
+
+        DynamoDB has no partial update here — put_item replaces the whole item —
+        so we read the row (query by its ``{entity_id}/{thread_id}`` prefix),
+        merge the given fields, and write it back (same read-merge-put shape as
+        move_thread). Unknown/None field values are skipped. Best-effort: a
+        missing row or read failure returns success:False without raising, so
+        callers can treat enrichment as non-critical.
+
+        ``fill_if_empty`` (optional dict) sets fields only when the existing
+        value is falsy — used to name a thread from the first user message
+        without clobbering a later trip title.
+        """
+        try:
+            if not all([portfolio, org, entity_type, entity_id, thread_id]):
+                return {"success": False, "message": "Missing required parameters"}
+            patch = {k: v for k, v in fields.items() if v is not None}
+            fill = {
+                k: v for k, v in (fill_if_empty or {}).items() if v is not None
+            }
+            if not patch and not fill:
+                return {"success": True, "message": "Nothing to update", "updated": 0}
+
+            thread_index = f"irn:chat:{portfolio}:{org}:{entity_type}/thread:*/*"
+            prefix = f"{entity_id}/{thread_id}"
+            resp = self.CHM.query_chat(thread_index, prefix, limit=1000, sort='asc')
+            for row in (resp.get('items') or []):
+                if row.get('_id') != thread_id:
+                    continue
+                merged = copy.deepcopy(dict(row))
+                for k, v in fill.items():
+                    if not merged.get(k):
+                        merged[k] = v
+                merged.update(patch)
+                self.CHM.update_chat(merged)
+                return {"success": True, "thread_id": thread_id, "updated": 1}
+            return {"success": False, "message": "Thread not found", "updated": 0}
+        except Exception as e:
+            current_app.logger.error(f"Error in update_thread_meta: {str(e)}")
+            return {"success": False, "message": f"Error updating thread: {str(e)}", "status": 500}
 
     def move_thread(self, portfolio, org, entity_type, old_entity_id, new_entity_id, thread_id):
         """
@@ -431,13 +646,46 @@ class ChatController:
             if replacement is not None:
                 evl[i] = replacement
 
+    @staticmethod
+    def _turns_after(items, since):
+        """Turns created strictly after ``since`` (unix seconds).
+
+        ``create_turn`` stores ``time`` as a stringified float, so compare
+        numerically — a lexicographic compare misorders across digit widths.
+        A turn whose ``time`` can't be parsed is KEPT: dropping a turn we
+        cannot place in time would silently lose conversation, while keeping
+        it only risks showing one turn too many.
+        """
+        if not isinstance(items, list):
+            return items
+        kept = []
+        for turn in items:
+            try:
+                turn_time = float((turn or {}).get("time"))
+            except (TypeError, ValueError):
+                kept.append(turn)
+                continue
+            if turn_time > since:
+                kept.append(turn)
+        return kept
+
     def list_turns(
-        self, portfolio, org, entity_type, entity_id, thread_id, resolve=False
+        self, portfolio, org, entity_type, entity_id, thread_id, resolve=False,
+        since=None,
     ):
         """List turns. ``resolve`` is only for HTTP message APIs that inline tmp
         documents into ``tool_rs`` for the client. Agents, triage, and any code
         that needs the stored chain of thought (raw ``tmp_artifact`` pointers)
-        must call with ``resolve=False`` (the default)."""
+        must call with ``resolve=False`` (the default).
+
+        ``since`` (unix seconds) hides every turn created at or before that
+        instant — the context-reset cutoff (``irn:context_reset``). Nothing is
+        deleted: the turns stay in the database and a caller that passes no
+        cutoff still sees the whole conversation. This is the ONLY layer where
+        the cutoff can be applied for both readers, because the OpenAI-shape
+        messages that ``get_message_history`` derives from these turns carry
+        neither an id nor a timestamp.
+        """
         index = f"irn:chat:{portfolio}:{org}:{entity_type}/thread/time/turn:*/*/*/*"
 
         query = f"{entity_id}/{thread_id}"
@@ -446,6 +694,9 @@ class ChatController:
         sort = 'asc'
 
         response = self.CHM.query_chat(index, query, limit, sort=sort)
+
+        if since is not None and response.get("success"):
+            response["items"] = self._turns_after(response.get("items"), since)
 
         if not resolve or not response.get("success"):
             return response
@@ -795,3 +1046,115 @@ class ChatController:
                 "message": f"Error updating workspace: {str(e)}",
                 "status": 500
             }
+
+    # Workspace-cache keys this controller has to reason about. Listed here
+    # because reset_thread_context is the one place that must decide which of
+    # them survive a context reset.
+    CONTEXT_RESET_CACHE_KEY = 'irn:context_reset'
+    HISTORY_SUMMARIES_CACHE_KEY = 'irn:history_summaries'
+    TOKEN_USAGE_CACHE_KEY = 'irn:token_usage'
+
+    def reset_thread_context(self, portfolio, org, entity_type, entity_id, thread_id):
+        """Zero ONE thread's conversation context without deleting anything.
+
+        Stamps the `irn:context_reset` cutoff into the thread's workspace cache;
+        `list_turns(since=...)` then hides every earlier turn from both the agent
+        and the UI. The turns themselves stay in the database, so this is
+        reversible by dropping the marker.
+
+        Two cache keys decide whether this is correct, and handling them IS the
+        reason this lives here rather than in a PUT from the client:
+
+        * `irn:active_trip` MUST survive — clearing the chat may never unlink the
+          trip. `update_workspace` REPLACES `cache` wholesale (see above), so we
+          read the existing cache and merge into it; writing `{'cache': {marker}}`
+          straight through would silently drop the trip pointer.
+        * `irn:history_summaries` MUST NOT survive — a summary's `covers_up_to`
+          is an index into the PRE-reset history. Kept across a reset it would
+          index a history that just shrank, and corrupt assembly with no error.
+
+        Best-effort in the same spirit as update_thread_meta: returns
+        success:False instead of raising.
+        """
+        try:
+            if not all([portfolio, org, entity_type, entity_id, thread_id]):
+                return {"success": False, "message": "Missing required parameters"}
+
+            workspaces = self.list_workspaces(portfolio, org, entity_type, entity_id, thread_id)
+            items = (workspaces or {}).get('items') or []
+            if not (workspaces or {}).get('success') or not items:
+                # No workspace yet = no turns to hide (the agent creates it on
+                # the first turn). Nothing to reset, and not an error.
+                return {"success": True, "message": "No workspace for thread", "reset": 0}
+
+            # Same selection rule as AgentUtilities.mutate_workspace /
+            # get_active_workspace (last item wins). Writing the marker to a
+            # different workspace than the agent reads would silently no-op.
+            workspace = items[-1]
+            workspace_id = workspace.get('_id')
+            cache = dict(workspace.get('cache') or {})
+
+            cutoff = str(datetime.now().timestamp())
+            cache[self.CONTEXT_RESET_CACHE_KEY] = {
+                'since': cutoff,
+                'created_at': datetime.now().isoformat(),
+            }
+            cache.pop(self.HISTORY_SUMMARIES_CACHE_KEY, None)
+
+            # Token usage: the lifetime total keeps counting, but the
+            # since-reset bucket (what the UI shows as "current context") starts
+            # over — that is the whole point of the reset.
+            usage = cache.get(self.TOKEN_USAGE_CACHE_KEY)
+            if isinstance(usage, dict):
+                usage = dict(usage)
+                usage['since_reset'] = {}
+                cache[self.TOKEN_USAGE_CACHE_KEY] = usage
+
+            response = self.update_workspace(
+                portfolio, org, entity_type, entity_id, thread_id, workspace_id,
+                {'cache': cache},
+            )
+            if isinstance(response, dict) and not response.get('success'):
+                return response
+            return {
+                "success": True,
+                "thread_id": thread_id,
+                "workspace_id": workspace_id,
+                "since": cutoff,
+                "reset": 1,
+            }
+        except Exception as e:
+            current_app.logger.error(f"Error in reset_thread_context: {str(e)}")
+            return {
+                "success": False,
+                "message": f"Error resetting thread context: {str(e)}",
+                "status": 500
+            }
+
+    def get_context_reset_since(self, portfolio, org, entity_type, entity_id, thread_id):
+        """This thread's context-reset cutoff in unix seconds, or None.
+
+        Same marker the agent reads (noma's `_context_reset.read_marker`), for
+        callers holding a ChatController but no AgentUtilities — the HTTP
+        message route, so the UI and the agent hide the exact same turns.
+
+        Fails open: an unreadable workspace means "no cutoff" (full history),
+        never a blanked conversation.
+        """
+        try:
+            workspaces = self.list_workspaces(portfolio, org, entity_type, entity_id, thread_id)
+            items = (workspaces or {}).get('items') or []
+            if not items:
+                return None
+            # items[-1]: same active-workspace rule as AgentUtilities.
+            cache = (items[-1] or {}).get('cache') or {}
+            marker = cache.get(self.CONTEXT_RESET_CACHE_KEY)
+            if not isinstance(marker, dict):
+                return None
+            since = marker.get('since')
+            if since is None or since == '':
+                return None
+            return float(since)
+        except Exception as e:
+            current_app.logger.error(f"Error in get_context_reset_since: {str(e)}")
+            return None

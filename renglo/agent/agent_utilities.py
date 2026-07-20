@@ -81,12 +81,16 @@ class AgentUtilities:
         websocket_url = self.config.get('WEBSOCKET_CONNECTIONS', '')
         self.ws_client = WebSocketClient(websocket_url)
 
-    def get_message_history(self,filter={}):
+    def get_message_history(self,filter={},since=None):
         """
         Get the message history for the current thread.
         filter:{'param':<name>,'begins_with':<value>}
             param: The name of the parameter you are applying the filter: ['_interface','_next','_type']
             value: The begins at string for the value of the parameter to be filtered
+        since: unix seconds; drop every turn created at or before it (the
+            thread's context-reset cutoff). None (default) = whole history.
+            Applied at the TURN level because the messages returned here are
+            bare OpenAI-shape dicts with no id/timestamp to cut on.
 
         Returns:
             dict: Success status and message list
@@ -116,6 +120,7 @@ class AgentUtilities:
                 self.entity_id,
                 self.thread,
                 False,
+                since=since,
             )
 
             if 'success' not in response:
@@ -977,10 +982,43 @@ class AgentUtilities:
 
             _logger_workspace.debug("new_chat_message_document | response=%s", response.get('success'))
 
-            if 'success' not in response:
+            if not response.get('success'):
                 return {'success': False, 'action': action, 'input': message, 'output': response}
 
-            return {'success': True, 'action': action, 'input': message, 'output': response['document']}
+            # Best-effort: name the conversation-history row (lives under the
+            # user container {org}-u:{user}, not the conv-key where turns live)
+            # from this user message. Title is fill-if-empty so a later trip
+            # title is never overwritten; last_message always refreshes.
+            if public_user and self.thread:
+                try:
+                    preview = " ".join(str(message or "").split()).strip()
+                    if preview:
+                        if len(preview) > 80:
+                            preview = preview[:77] + "..."
+                        container = f"{self.org}-u:{public_user}"
+                        meta = self.CHC.update_thread_meta(
+                            self.portfolio,
+                            self.org,
+                            self.entity_type,
+                            container,
+                            self.thread,
+                            fill_if_empty={"title": preview},
+                            last_message=preview,
+                            last_message_at=str(datetime.now().timestamp()),
+                        )
+                        if not (meta or {}).get("success"):
+                            _logger_workspace.warning(
+                                "thread_meta_enrich_miss | container=%s thread=%s meta=%s",
+                                container,
+                                self.thread,
+                                meta,
+                            )
+                except Exception as enrich_exc:  # noqa: BLE001
+                    _logger_workspace.warning(
+                        "thread_meta_enrich_failed | %s", enrich_exc
+                    )
+
+            return {'success': True, 'action': action, 'input': message, 'output': response.get('document') or response}
 
         except Exception as e:
             _logger_workspace.error("get_or_create_turn_failed | %s", e)
