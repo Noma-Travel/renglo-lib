@@ -193,6 +193,56 @@ class AuthModel:
                 'status': 400
             }
 
+    def cognito_user_delete(self, email):
+        """
+        Delete Cognito user(s) matching the email attribute.
+        Needed so People-page deletes can fully free an address for re-invite.
+        """
+        try:
+            if not email:
+                return {
+                    'success': False,
+                    'message': 'Email is required',
+                    'status': 400,
+                }
+
+            response = self.cognito_client.list_users(
+                UserPoolId=self.USER_POOL_ID,
+                Filter=f'email = "{email}"',
+            )
+            users = response.get('Users') or []
+            if not users:
+                return {
+                    'success': True,
+                    'message': 'No Cognito user for this email',
+                    'document': {'deleted': []},
+                    'status': 200,
+                }
+
+            deleted = []
+            for user in users:
+                username = user.get('Username')
+                if not username:
+                    continue
+                self.cognito_client.admin_delete_user(
+                    UserPoolId=self.USER_POOL_ID,
+                    Username=username,
+                )
+                deleted.append(username)
+
+            return {
+                'success': True,
+                'message': f'Deleted {len(deleted)} Cognito user(s)',
+                'document': {'deleted': deleted},
+                'status': 200,
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'message': str(e),
+                'status': 400,
+            }
+
 
     #NOT USED 
     def cognito_user_login_challenge(self,email,new_password):
