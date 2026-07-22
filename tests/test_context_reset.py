@@ -122,6 +122,18 @@ def test_reset_zeroes_the_since_reset_tokens_but_keeps_the_lifetime_total():
     assert usage["total"]["total_tokens"] == 900
 
 
+def test_reset_zeroes_the_live_context_meter():
+    # last_prompt_tokens is what the UI badge actually renders. Leaving it
+    # untouched made the badge show the pre-reset context size until the next
+    # turn — i.e. the reset looked like a no-op.
+    chc = _reset_chc({TOKENS: {"last_prompt_tokens": 9000,
+                               "total": {"total_tokens": 900},
+                               "since_reset": {"total_tokens": 400}}})
+    chc.reset_thread_context("p", "o", "et", "e", "t")
+    usage = _written_cache(chc)[TOKENS]
+    assert usage["last_prompt_tokens"] == 0
+
+
 def test_reset_without_a_workspace_is_a_noop_not_a_failure():
     # No workspace = the agent never ran = no turns to hide.
     chc = _chc()

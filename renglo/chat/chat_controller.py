@@ -1102,12 +1102,16 @@ class ChatController:
             cache.pop(self.HISTORY_SUMMARIES_CACHE_KEY, None)
 
             # Token usage: the lifetime total keeps counting, but the
-            # since-reset bucket (what the UI shows as "current context") starts
-            # over — that is the whole point of the reset.
+            # since-reset bucket AND the live context meter (last_prompt_tokens
+            # — what the UI badge actually renders) both start over. Zeroing
+            # since_reset alone left the badge showing the pre-reset context
+            # size until the next turn's LLM call overwrote it, which made the
+            # reset look like it had no effect.
             usage = cache.get(self.TOKEN_USAGE_CACHE_KEY)
             if isinstance(usage, dict):
                 usage = dict(usage)
                 usage['since_reset'] = {}
+                usage['last_prompt_tokens'] = 0
                 cache[self.TOKEN_USAGE_CACHE_KEY] = usage
 
             response = self.update_workspace(
