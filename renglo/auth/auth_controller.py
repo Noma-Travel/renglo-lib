@@ -236,21 +236,27 @@ class AuthController:
         
         self.logger.debug('Invite User Funnel > response: '+ str(response))
 
-        # Do not return the full funnel document (contains invite hash internals),
-        # but do surface invite_url so the inviter can copy the link if Resend fails.
+        # Warning: Never send out the funnel response as it contains the solution to the challenge.
+        # (The challenge is to demonstrate that the invitee has access to the inbox.)
+        # We DO propagate the funnel's `message` string (e.g. "RESEND_API_KEY is not
+        # configured") since it never carries the hash/challenge data — only `document`
+        # (the transaction list, containing the hash) does, and we don't forward that.
+        # Surface invite_url so the inviter can copy the link if Resend fails.
         invite_url = response.get('invite_url')
         if response['success']:
             return{
-                "success":True, 
-                "message": "Invite has been sent out.", 
+                "success":True,
+                "message": "Invite has been sent out.",
                 "status" : 200,
                 "email_sent": True,
                 "invite_url": invite_url,
                 }
         else:
+            real_reason = response.get('message', 'Unknown error')
+            self.logger.error('invite_user: invite_user_funnel failed - %s', real_reason)
             return{
-                "success":False, 
-                "message": response.get('message') or "Invite could not be sent out.", 
+                "success":False,
+                "message": f"Invite could not be sent out: {real_reason}",
                 "status" :400,
                 "email_sent": False,
                 "invite_url": invite_url,
@@ -1389,7 +1395,7 @@ class AuthController:
 
     
     def generate_invite_hash(self,email,ttl):
-        secret_key = (self.config.get('SECRET_KEY') or '').strip()
+        secret_key = str(self.config.get('SECRET_KEY') or '').strip()
         if not secret_key:
             secret_key = globals().get('SECRET_KEY', '')
         string_to_hash = email + secret_key + str(ttl)
@@ -2278,9 +2284,7 @@ class AuthController:
         loc_root = (locale or 'en').split('-')[0].lower()
         t = self._INVITE_I18N.get(loc_root) or self._INVITE_I18N['en']
 
-        team_label = f"{portfolio_name}/{team_name}" if portfolio_name and team_name else (
-            portfolio_name or team_name or t['fallback_team_label']
-        )
+        team_label = portfolio_name or team_name or t['fallback_team_label']
         sender_display = (sender_name or '').strip()
 
         invited_by_line = (
@@ -2486,8 +2490,8 @@ class AuthController:
 
         invite_sender = self._invite_from_address()
 
-        sender_first = (bridge['senderdoc'].get('name') or '').strip()
-        sender_last = (bridge['senderdoc'].get('slot_a') or '').strip()
+        sender_first = str(bridge['senderdoc'].get('name') or '').strip()
+        sender_last = str(bridge['senderdoc'].get('slot_a') or '').strip()
         sender_full = (sender_first + ' ' + sender_last).strip()
         fe_base = self._invite_fe_base_url().rstrip('/')
         invite_url = (
@@ -2511,10 +2515,11 @@ class AuthController:
             body_text=email_payload['body_text'],
             body_html=email_payload['body_html'],
         )
-        
         if not response_4['success']:
             # Keep Resend's error detail; still return invite_url for manual copy.
-            response_4['message'] = response_4.get('message') or 'Could not send the invite'
+            real_reason = response_4.get('message', 'Unknown error')
+            self.logger.error('Invite funnel: send_email failed - %s', real_reason)
+            response_4['message'] = f'Could not send the invite: {real_reason}'
             response_4['email_sent'] = False
             response_4['invite_url'] = invite_url
             return response_4
