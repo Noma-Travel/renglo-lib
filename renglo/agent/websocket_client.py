@@ -9,7 +9,17 @@ from typing import Any, Dict
 
 
 def _outbound_local_http_url(websocket_url: str) -> str:
-    """ws(s) → http(s), trim, and map bind-only hosts (0.0.0.0, [::]) to localhost for outbound HTTP."""
+    """ws(s) → http(s), trim, map bind-only hosts (0.0.0.0, [::]) to localhost,
+    and target the local dev service's HTTP push endpoint.
+
+    The local WebSocket dev service (extensions/wss/dev_ws_service.py) reserves
+    the root ``/`` and ``/ws`` for the browser's WebSocket upgrade and exposes
+    the server→client push as ``POST /send_to_client``. WEBSOCKET_CONNECTIONS is
+    shared with the frontend (it needs ``/ws``), so the correct backend push
+    URL is derived here instead of in config: strip the ws path down to the
+    host, then append ``/send_to_client``. Posting to the bare host root hits a
+    WebSocket route and 405s.
+    """
     u = (websocket_url or "").strip()
     if u.startswith("ws://"):
         u = "http://" + u[5:]
@@ -21,7 +31,7 @@ def _outbound_local_http_url(websocket_url: str) -> str:
     # Copy-paste from server logs; Windows cannot use 0.0.0.0 / [::] as HTTP client target.
     u = u.replace("://0.0.0.0", "://localhost", 1)
     u = u.replace("://[::]", "://localhost", 1)
-    return u
+    return u.rstrip("/") + "/send_to_client"
 
 
 class DecimalEncoder(json.JSONEncoder):

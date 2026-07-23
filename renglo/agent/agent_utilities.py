@@ -57,6 +57,11 @@ class AgentUtilities:
         self.thread = thread
         self.chat_id = None
         self.connection_id = connection_id
+        # Stashed by llm() after each real Chat Completions call — agent_react's
+        # _capture_llm_usage() reads this because llm() only returns
+        # response.choices[0].message, which never carries .usage (that lives
+        # on the top-level response object).
+        self.last_llm_usage = None
 
         # OpenAI Client
         try:
@@ -81,12 +86,16 @@ class AgentUtilities:
         websocket_url = self.config.get('WEBSOCKET_CONNECTIONS', '')
         self.ws_client = WebSocketClient(websocket_url)
 
-    def get_message_history(self,filter={}):
+    def get_message_history(self,filter={},since=None):
         """
         Get the message history for the current thread.
         filter:{'param':<name>,'begins_with':<value>}
             param: The name of the parameter you are applying the filter: ['_interface','_next','_type']
             value: The begins at string for the value of the parameter to be filtered
+        since: unix seconds; drop every turn created at or before it (the
+            thread's context-reset cutoff). None (default) = whole history.
+            Applied at the TURN level because the messages returned here are
+            bare OpenAI-shape dicts with no id/timestamp to cut on.
 
         Returns:
             dict: Success status and message list
@@ -116,6 +125,7 @@ class AgentUtilities:
                 self.entity_id,
                 self.thread,
                 False,
+                since=since,
             )
 
             if 'success' not in response:
@@ -813,6 +823,28 @@ class AgentUtilities:
             # response = self.AI_1.chat.completions.create(**params)
             response = self.AI_2.chat.completions.create(**params)
 
+            # Stash usage BEFORE unwrapping to .message — it only lives on the
+            # top-level response, and agent_react's per-turn token accounting
+            # (the "context meter" badge) reads it from here via
+            # AGU.last_llm_usage. Best-effort: a malformed/absent usage object
+            # must not fail a call that otherwise succeeded.
+            try:
+                usage_obj = getattr(response, 'usage', None)
+                if usage_obj is not None:
+                    details = getattr(usage_obj, 'prompt_tokens_details', None)
+                    cached_tokens = getattr(details, 'cached_tokens', 0) if details is not None else 0
+                    self.last_llm_usage = {
+                        'prompt_tokens': getattr(usage_obj, 'prompt_tokens', 0) or 0,
+                        'completion_tokens': getattr(usage_obj, 'completion_tokens', 0) or 0,
+                        'total_tokens': getattr(usage_obj, 'total_tokens', 0) or 0,
+                        'cached_tokens': cached_tokens or 0,
+                    }
+                else:
+                    self.last_llm_usage = None
+            except Exception as usage_exc:
+                _logger_llm.debug("llm usage capture failed | %s", usage_exc)
+                self.last_llm_usage = None
+
             resp = response.choices[0].message
             _logger_llm.info("llm result returned successfully and has_tool_calls=%s", bool(resp.tool_calls))
             djson("llm_last_response.json", {"role": resp.role, "content": resp.content, "tool_calls": [{"id": tc.id, "function": {"name": tc.function.name}} for tc in (resp.tool_calls or [])]})
@@ -820,6 +852,9 @@ class AgentUtilities:
 
         except Exception as e:
             _logger_llm.error("llm error model=%s %s", params.get('model', ''), e)
+            # Don't let a stale usage reading from a PREVIOUS successful call
+            # get attributed to this failed one.
+            self.last_llm_usage = None
             return False
 
     def llm_responses(self, input_items, tools, model=None):
@@ -977,10 +1012,43 @@ class AgentUtilities:
 
             _logger_workspace.debug("new_chat_message_document | response=%s", response.get('success'))
 
-            if 'success' not in response:
+            if not response.get('success'):
                 return {'success': False, 'action': action, 'input': message, 'output': response}
 
-            return {'success': True, 'action': action, 'input': message, 'output': response['document']}
+            # Best-effort: name the conversation-history row (lives under the
+            # user container {org}-u:{user}, not the conv-key where turns live)
+            # from this user message. Title is fill-if-empty so a later trip
+            # title is never overwritten; last_message always refreshes.
+            if public_user and self.thread:
+                try:
+                    preview = " ".join(str(message or "").split()).strip()
+                    if preview:
+                        if len(preview) > 80:
+                            preview = preview[:77] + "..."
+                        container = f"{self.org}-u:{public_user}"
+                        meta = self.CHC.update_thread_meta(
+                            self.portfolio,
+                            self.org,
+                            self.entity_type,
+                            container,
+                            self.thread,
+                            fill_if_empty={"title": preview},
+                            last_message=preview,
+                            last_message_at=str(datetime.now().timestamp()),
+                        )
+                        if not (meta or {}).get("success"):
+                            _logger_workspace.warning(
+                                "thread_meta_enrich_miss | container=%s thread=%s meta=%s",
+                                container,
+                                self.thread,
+                                meta,
+                            )
+                except Exception as enrich_exc:  # noqa: BLE001
+                    _logger_workspace.warning(
+                        "thread_meta_enrich_failed | %s", enrich_exc
+                    )
+
+            return {'success': True, 'action': action, 'input': message, 'output': response.get('document') or response}
 
         except Exception as e:
             _logger_workspace.error("get_or_create_turn_failed | %s", e)

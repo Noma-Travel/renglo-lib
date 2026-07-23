@@ -116,6 +116,24 @@ class AuthController:
         return None
 
 
+    def _invite_fe_base_url(self):
+        """Public frontend origin for invite/login links (never the API BASE_URL alone)."""
+        module_base = globals().get('BASE_URL') or ''
+        return (
+            (self.config.get('APP_FE_BASE_URL') or '').strip()
+            or (self.config.get('FE_BASE_URL') or '').strip()
+            or (module_base or '').strip()
+            or (self.config.get('BASE_URL') or '').strip()
+            or 'http://127.0.0.1:3000'
+        )
+
+    def _invite_from_address(self):
+        return (
+            (self.config.get('INVITE_FROM') or '').strip()
+            or (self.config.get('SES_INVITE_SENDER') or '').strip()
+            or 'Noma <noreply@email.travelwithnoma.com>'
+        )
+
     def invite_user(self,email,team_id,portfolio_id,sender_id,locale='en'):
         '''
         Invites user to a team
@@ -125,6 +143,9 @@ class AuthController:
         - team_id
         - portfolio_id
         - locale (optional): 'pt' or 'en' for localized invite email
+
+        Returns email_sent / invite_url when an email invite is attempted so callers
+        (e.g. invite_attendant) can offer a copy-link fallback on delivery failure.
         '''
         # 1. Check whether the email is valid
         #This function is not working. It is rejecting valid emails
@@ -162,14 +183,18 @@ class AuthController:
                     return{
                         "success":True, 
                         "message": "User has been added to the team.", 
-                        "status" : 200
+                        "status" : 200,
+                        "email_sent": False,
+                        "invite_url": None,
                         }
                 else:
                     self.logger.debug('User could not be added to the team:'+str(response))
                     return{
                         "success":False, 
                         "message": "User could not be added to the team.", 
-                        "status" :400
+                        "status" :400,
+                        "email_sent": False,
+                        "invite_url": None,
                         }
             
                 
@@ -181,13 +206,17 @@ class AuthController:
                     return{
                         "success":True, 
                         "message": "User has been added to the team and portfolio.", 
-                        "status" : 200
+                        "status" : 200,
+                        "email_sent": False,
+                        "invite_url": None,
                         }
                 else:
                     return{
                         "success":False, 
                         "message": "User could not be added to the team and portfolio.", 
-                        "status" :400
+                        "status" :400,
+                        "email_sent": False,
+                        "invite_url": None,
                         }
         
         else:
@@ -196,7 +225,7 @@ class AuthController:
             pass
 
 
-        # USER DOES NOT EXIST IN THE USER POOL OR IT IS NOT PART OF THE PORTFOLIO, SEND EMAIL INVITE
+        # USER DOES NOT EXIST IN THE USER POOL — SEND EMAIL INVITE
         response = self.invite_user_funnel(
             email=email,
             team_id=team_id,
@@ -212,11 +241,15 @@ class AuthController:
         # We DO propagate the funnel's `message` string (e.g. "RESEND_API_KEY is not
         # configured") since it never carries the hash/challenge data — only `document`
         # (the transaction list, containing the hash) does, and we don't forward that.
+        # Surface invite_url so the inviter can copy the link if Resend fails.
+        invite_url = response.get('invite_url')
         if response['success']:
             return{
                 "success":True,
                 "message": "Invite has been sent out.",
-                "status" : 200
+                "status" : 200,
+                "email_sent": True,
+                "invite_url": invite_url,
                 }
         else:
             real_reason = response.get('message', 'Unknown error')
@@ -224,7 +257,9 @@ class AuthController:
             return{
                 "success":False,
                 "message": f"Invite could not be sent out: {real_reason}",
-                "status" :400
+                "status" :400,
+                "email_sent": False,
+                "invite_url": invite_url,
                 }
 
 
@@ -2192,10 +2227,13 @@ class AuthController:
             'subject_with_sender': '{sender} invited you to {team} on {brand}',
             'subject_no_sender': "You're invited to join {team} on {brand}",
             'cta': 'Accept invitation →',
+            'cta_sign_in': 'Sign in →',
             'fallback_intro': "If the button doesn't work, paste this link in your browser:",
             'expiry_hint': "This invitation expires in 24 hours. If you weren't expecting this email, you can safely ignore it.",
+            'expiry_hint_existing': "If you weren't expecting this email, you can safely ignore it.",
             'footer': 'Sent by',
             'accept_action_text': 'Accept the invitation:',
+            'sign_in_action_text': 'Sign in to continue:',
             'fallback_team_label': 'your team',
             'signature_dash': '— ',
         },
@@ -2211,17 +2249,21 @@ class AuthController:
             'subject_with_sender': '{sender} convidou você para {team} no {brand}',
             'subject_no_sender': 'Você foi convidado(a) para entrar em {team} no {brand}',
             'cta': 'Aceitar convite →',
+            'cta_sign_in': 'Entrar →',
             'fallback_intro': 'Se o botão não funcionar, cole este link no seu navegador:',
             'expiry_hint': 'Este convite expira em 24 horas. Se você não estava esperando este e-mail, pode ignorá-lo com segurança.',
+            'expiry_hint_existing': 'Se você não estava esperando este e-mail, pode ignorá-lo com segurança.',
             'footer': 'Enviado por',
             'accept_action_text': 'Aceitar o convite:',
+            'sign_in_action_text': 'Entre para continuar:',
             'fallback_team_label': 'seu time',
             'signature_dash': '— ',
         },
     }
 
     def _build_invite_email(self, sender_name, portfolio_name, team_name,
-                            code, invite_url, brand_name='Noma', locale='en'):
+                            code, invite_url, brand_name='Noma', locale='en',
+                            existing_user=False):
         """
         Renders the invite email in Noma brand style, localized per `locale`.
         Returns dict with keys: subject, body_text, body_html.
@@ -2233,6 +2275,9 @@ class AuthController:
         The `code` arg is kept in the signature for backward compatibility,
         but is no longer shown in the email body (the invite URL already
         carries it).
+
+        existing_user: when True, CTA points at sign-in (account already exists)
+        instead of the /invite accept flow.
         """
         brand = self._INVITE_BRAND
         # Normalize locale: accept variants like 'pt-BR', 'en-US'.
@@ -2259,10 +2304,14 @@ class AuthController:
             else t['subject_no_sender'].format(team=team_label, brand=brand_name)
         )
 
+        cta_label = t['cta_sign_in'] if existing_user else t['cta']
+        action_text = t['sign_in_action_text'] if existing_user else t['accept_action_text']
+        expiry_hint = t['expiry_hint_existing'] if existing_user else t['expiry_hint']
+
         body_text = (
             f"{invited_by_text}\n\n"
-            f"{t['accept_action_text']}\n{invite_url}\n\n"
-            f"{t['expiry_hint']}\n\n"
+            f"{action_text}\n{invite_url}\n\n"
+            f"{expiry_hint}\n\n"
             f"{t['signature_dash']}{brand_name}"
         )
 
@@ -2304,7 +2353,7 @@ class AuthController:
             f'style="display:inline-block;padding:14px 32px;background:{brand["navy"]};'
             'color:#ffffff;font-size:14px;font-weight:700;text-decoration:none;'
             'border-radius:10px;letter-spacing:0.2px;">'
-            f'{t["cta"]}'
+            f'{cta_label}'
             '</a>'
             '</td></tr></table>'
 
@@ -2318,7 +2367,7 @@ class AuthController:
 
             # Expiry hint
             f'<p style="margin:0;font-size:12px;color:{brand["muted"]};line-height:1.5;">'
-            f'{t["expiry_hint"]}'
+            f'{expiry_hint}'
             '</p>'
             '</td></tr>'
 
@@ -2439,26 +2488,24 @@ class AuthController:
 
         #4. Send email to invite recipient
 
-        invite_sender = (
-            (self.config.get('INVITE_FROM') or '').strip()
-            or (self.config.get('SES_INVITE_SENDER') or '').strip()
-            or 'Noma <noreply@email.travelwithnoma.com>'
-        )
+        invite_sender = self._invite_from_address()
 
         sender_first = str(bridge['senderdoc'].get('name') or '').strip()
         sender_last = str(bridge['senderdoc'].get('slot_a') or '').strip()
         sender_full = (sender_first + ' ' + sender_last).strip()
+        fe_base = self._invite_fe_base_url().rstrip('/')
         invite_url = (
-            BASE_URL + '/invite?code=' + rel_data['hash']
+            fe_base + '/invite?code=' + bridge['hash']
             + '&email=' + kwargs['email']
         )
+        brand_name = globals().get('WL_NAME') or self.config.get('WL_NAME') or 'Noma'
         email_payload = self._build_invite_email(
             sender_name=sender_full,
             portfolio_name=bridge['portfoliodoc'].get('name', ''),
             team_name=bridge['teamdoc'].get('name', ''),
-            code=rel_data['hash'],
+            code=bridge['hash'],
             invite_url=invite_url,
-            brand_name=WL_NAME,
+            brand_name=brand_name,
             locale=kwargs.get('locale', 'en'),
         )
         response_4 = self.AUM.send_email(
@@ -2468,14 +2515,18 @@ class AuthController:
             body_text=email_payload['body_text'],
             body_html=email_payload['body_html'],
         )
-
         if not response_4['success']:
+            # Keep Resend's error detail; still return invite_url for manual copy.
             real_reason = response_4.get('message', 'Unknown error')
             self.logger.error('Invite funnel: send_email failed - %s', real_reason)
             response_4['message'] = f'Could not send the invite: {real_reason}'
+            response_4['email_sent'] = False
+            response_4['invite_url'] = invite_url
             return response_4
         else:
-            response_4['message'] = 'Sent invite to team '+kwargs['team_id']+' via email to '+kwargs['email']
+            response_4['message'] = (
+                'Sent invite to team ' + kwargs['team_id'] + ' via email to ' + kwargs['email']
+            )
             transaction.append(response_4)
 
 
@@ -2487,10 +2538,79 @@ class AuthController:
         result['success'] = True
         result['message'] = 'Invite User Funnel completed, Ok'
         result['status'] = 200 
-        result['document'] = transaction  
+        result['document'] = transaction
+        result['email_sent'] = True
+        result['invite_url'] = invite_url
 
         self.logger.debug(result)            
         return result
+
+
+
+    def send_existing_user_invite_email(
+        self,
+        email,
+        team_id,
+        portfolio_id,
+        sender_id=None,
+        locale='en',
+    ):
+        """
+        Notify an existing Cognito/Dynamo user that they were added as a traveler.
+        Uses a sign-in link (not /invite), since the accept-invite flow rejects
+        emails that already exist in the user pool.
+        """
+        team_name = ''
+        portfolio_name = ''
+        sender_full = ''
+
+        team_resp = self.get_entity('team', portfolio_id=portfolio_id, team_id=team_id)
+        if team_resp.get('success'):
+            team_name = (team_resp['document'] or {}).get('name', '') or ''
+
+        portfolio_resp = self.get_entity('portfolio', portfolio_id=portfolio_id)
+        if portfolio_resp.get('success'):
+            portfolio_name = (portfolio_resp['document'] or {}).get('name', '') or ''
+
+        if sender_id:
+            sender_resp = self.get_entity('user', user_id=sender_id)
+            if sender_resp.get('success'):
+                doc = sender_resp['document'] or {}
+                sender_full = (
+                    (doc.get('name') or '').strip() + ' ' + (doc.get('slot_a') or '').strip()
+                ).strip()
+
+        fe_base = self._invite_fe_base_url().rstrip('/')
+        from urllib.parse import quote
+        invite_url = f"{fe_base}/login?email={quote(email or '')}"
+        brand_name = globals().get('WL_NAME') or self.config.get('WL_NAME') or 'Noma'
+
+        email_payload = self._build_invite_email(
+            sender_name=sender_full,
+            portfolio_name=portfolio_name,
+            team_name=team_name,
+            code='',
+            invite_url=invite_url,
+            brand_name=brand_name,
+            locale=locale,
+            existing_user=True,
+        )
+        response = self.AUM.send_email(
+            sender=self._invite_from_address(),
+            recipient=email,
+            subject=email_payload['subject'],
+            body_text=email_payload['body_text'],
+            body_html=email_payload['body_html'],
+        )
+        return {
+            "success": bool(response.get('success')),
+            "message": response.get('message') or (
+                'Invite email sent' if response.get('success') else 'Could not send the invite'
+            ),
+            "status": response.get('status') or (200 if response.get('success') else 400),
+            "email_sent": bool(response.get('success')),
+            "invite_url": invite_url,
+        }
 
 
 
