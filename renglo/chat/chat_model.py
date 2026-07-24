@@ -271,28 +271,32 @@ class ChatModel:
                 }
 
 
-    # NOT USED
-    def delete_chat(self,**data):
-
-        keys = {
-            'irn': data['irn'],
-            'time': data['time']
-        }
-
+    def delete_chat(self, data):
+        """Delete one chat row by its DynamoDB primary key (index + entity_index)."""
         try:
+            keys = {
+                'index': data['index'],
+                'entity_index': data['entity_index'],
+            }
             response = self.chat_table.delete_item(Key=keys)
-            current_app.logger.debug('MODEL: Deleted Chat:' + str(data))
+            current_app.logger.debug('MODEL: Deleted Chat: %s', keys)
             return {
-                "success":True,
+                "success": True,
                 "message": "Entity deleted",
                 "document": data,
-                "status" : response['ResponseMetadata']['HTTPStatusCode']
-                }
-
+                "status": response['ResponseMetadata']['HTTPStatusCode'],
+            }
         except ClientError as e:
             return {
-                "success":False,
+                "success": False,
                 "message": e.response['Error']['Message'],
                 "document": data,
-                "status" : e.response['ResponseMetadata']['HTTPStatusCode']
-                }
+                "status": e.response['ResponseMetadata']['HTTPStatusCode'],
+            }
+        except (KeyError, TypeError) as e:
+            return {
+                "success": False,
+                "message": f"Missing delete keys: {e}",
+                "document": data,
+                "status": 400,
+            }
