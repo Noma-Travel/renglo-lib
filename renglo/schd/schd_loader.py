@@ -177,6 +177,9 @@ class SchdLoader:
 
             instance = self.load_code_class(module_parts[0], module_parts[1], class_name, *args, **kwargs)
             runtime_loaded_class = True
+            # importlib caches as "pkg.handlers.name"; actual_module_name may still be
+            # "pkg/name" (slash form from the chat router). Always unload the real key.
+            imported_module_name = f"{module_parts[0]}.handlers.{module_parts[1]}"
 
             if not instance:
                 error = f"Class '{class_name}' in '{actual_module_name}' could not be loaded."
@@ -200,10 +203,11 @@ class SchdLoader:
 
 
             if runtime_loaded_class:
-                # Unload module to free memory
+                # Unload module to free memory / pick up source edits on next call
                 del instance
-                if actual_module_name in sys.modules:
-                    del sys.modules[actual_module_name]
+                for key in (imported_module_name, actual_module_name, module_name):
+                    if key in sys.modules:
+                        del sys.modules[key]
                 gc.collect()
 
             if result is None:

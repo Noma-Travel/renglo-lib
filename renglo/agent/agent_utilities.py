@@ -941,13 +941,18 @@ class AgentUtilities:
             _logger_workspace.error("get_or_create_thread_failed | %s", e)
             return {'success': False,'action': action,'output': f"{e}"}
 
-    def new_chat_message_document(self, message, public_user=None, next=None):
+    def new_chat_message_document(
+        self, message, public_user=None, next=None, inbox_user_ids=None,
+    ):
         """
         Create a new chat message document.
 
         Args:
             message (str): The message content
-            public_user (str): The public user identifier
+            public_user (str): Canonical public user (md5) — authz/owner identity
+            inbox_user_ids (list, optional): Extra FE-aligned ids to try when
+                enriching the conversation-list row under ``{org}-u:{user}``.
+                Does not change ``public_user`` for anything else.
 
         Returns:
             dict: Success status and response
@@ -1019,27 +1024,40 @@ class AgentUtilities:
             # user container {org}-u:{user}, not the conv-key where turns live)
             # from this user message. Title is fill-if-empty so a later trip
             # title is never overwritten; last_message always refreshes.
-            if public_user and self.thread:
+            # FE may have created the row under custom:public_user / raw sub
+            # while public_user here is md5(sub,9) — try inbox_user_ids too.
+            candidates = []
+            for raw in list(inbox_user_ids or []) + [public_user]:
+                uid = str(raw or "").strip()
+                if uid and uid not in candidates:
+                    candidates.append(uid)
+            if candidates and self.thread:
                 try:
                     preview = " ".join(str(message or "").split()).strip()
                     if preview:
                         if len(preview) > 80:
                             preview = preview[:77] + "..."
-                        container = f"{self.org}-u:{public_user}"
-                        meta = self.CHC.update_thread_meta(
+                        meta = self.CHC.enrich_user_thread_meta(
                             self.portfolio,
                             self.org,
                             self.entity_type,
-                            container,
                             self.thread,
+                            candidates,
                             fill_if_empty={"title": preview},
                             last_message=preview,
                             last_message_at=str(datetime.now().timestamp()),
                         )
                         if not (meta or {}).get("success"):
-                            _logger_workspace.warning(
-                                "thread_meta_enrich_miss | container=%s thread=%s meta=%s",
-                                container,
+                            # No inbox row under any candidate — common for
+                            # orphan thread ids; keep WARNING for other errors.
+                            msg = (meta or {}).get("message") or ""
+                            log = (
+                                _logger_workspace.debug
+                                if msg == "Thread not found"
+                                else _logger_workspace.warning
+                            )
+                            log(
+                                "thread_meta_enrich_miss | thread=%s meta=%s",
                                 self.thread,
                                 meta,
                             )

@@ -330,11 +330,15 @@ class ChatController:
         thread row, leaving every other field intact.
 
         DynamoDB has no partial update here — put_item replaces the whole item —
-        so we read the row (query by its ``{entity_id}/{thread_id}`` prefix),
-        merge the given fields, and write it back (same read-merge-put shape as
-        move_thread). Unknown/None field values are skipped. Best-effort: a
-        missing row or read failure returns success:False without raising, so
-        callers can treat enrichment as non-critical.
+        so we read the row, merge the given fields, and write it back (same
+        read-merge-put shape as move_thread). Unknown/None field values are
+        skipped. Best-effort: a missing row or read failure returns
+        success:False without raising, so callers can treat enrichment as
+        non-critical.
+
+        Lookup tries the new ``{entity_id}/{thread_id}`` sort key first, then
+        falls back to ``begins_with(entity_id)`` (legacy rows + same filter as
+        ``delete_thread``). Never creates a row.
 
         ``fill_if_empty`` (optional dict) sets fields only when the existing
         value is falsy — used to name a thread from the first user message
@@ -351,22 +355,77 @@ class ChatController:
                 return {"success": True, "message": "Nothing to update", "updated": 0}
 
             thread_index = f"irn:chat:{portfolio}:{org}:{entity_type}/thread:*/*"
-            prefix = f"{entity_id}/{thread_id}"
-            resp = self.CHM.query_chat(thread_index, prefix, limit=1000, sort='asc')
-            for row in (resp.get('items') or []):
-                if row.get('_id') != thread_id:
+            # New rows: entity_index == "{entity_id}/{thread_id}". Legacy rows:
+            # entity_index == entity_id. Exact prefix first; then container scan.
+            prefixes = (f"{entity_id}/{thread_id}", str(entity_id))
+            seen = set()
+            for prefix in prefixes:
+                if prefix in seen:
                     continue
-                merged = copy.deepcopy(dict(row))
-                for k, v in fill.items():
-                    if not merged.get(k):
-                        merged[k] = v
-                merged.update(patch)
-                self.CHM.update_chat(merged)
-                return {"success": True, "thread_id": thread_id, "updated": 1}
+                seen.add(prefix)
+                resp = self.CHM.query_chat(thread_index, prefix, limit=1000, sort='asc')
+                for row in (resp.get('items') or []):
+                    if row.get('_id') != thread_id:
+                        continue
+                    # Refuse cross-container hits from a broad begins_with.
+                    row_eid = (row.get('entity_id') or '').strip()
+                    if row_eid and row_eid != entity_id:
+                        continue
+                    merged = copy.deepcopy(dict(row))
+                    for k, v in fill.items():
+                        if not merged.get(k):
+                            merged[k] = v
+                    merged.update(patch)
+                    self.CHM.update_chat(merged)
+                    return {"success": True, "thread_id": thread_id, "updated": 1}
             return {"success": False, "message": "Thread not found", "updated": 0}
         except Exception as e:
             current_app.logger.error(f"Error in update_thread_meta: {str(e)}")
             return {"success": False, "message": f"Error updating thread: {str(e)}", "status": 500}
+
+    def enrich_user_thread_meta(
+        self, portfolio, org, entity_type, thread_id, user_ids,
+        fill_if_empty=None, **fields,
+    ):
+        """Best-effort inbox enrich under ``{org}-u:{user}`` for each candidate.
+
+        The FE may create the conversation-list row under a Cognito claim
+        (``custom:public_user`` / raw ``sub``) while the agent turn's canonical
+        ``public_user`` is ``md5(sub, 9)``. Try each id until a row matches —
+        **update only**, never create. Authz/owner callers must keep using the
+        canonical public_user; this helper is display-meta only.
+        """
+        last = {"success": False, "message": "Thread not found", "updated": 0}
+        tried = []
+        for raw in user_ids or []:
+            uid = str(raw or "").strip()
+            if not uid or uid in tried:
+                continue
+            tried.append(uid)
+            container = f"{org}-u:{uid}"
+            last = self.update_thread_meta(
+                portfolio,
+                org,
+                entity_type,
+                container,
+                thread_id,
+                fill_if_empty=fill_if_empty,
+                **fields,
+            )
+            if (last or {}).get("success"):
+                if len(tried) > 1:
+                    _logger_workspace.debug(
+                        "thread_meta_enrich_fallback | container=%s thread=%s tried=%s",
+                        container,
+                        thread_id,
+                        tried,
+                    )
+                return {**(last or {}), "container": container, "public_user": uid}
+        if tried:
+            last = {**(last or {}), "containers_tried": [
+                f"{org}-u:{u}" for u in tried
+            ]}
+        return last
 
     def move_thread(self, portfolio, org, entity_type, old_entity_id, new_entity_id, thread_id):
         """

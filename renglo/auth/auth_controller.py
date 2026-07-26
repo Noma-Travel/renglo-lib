@@ -1149,7 +1149,7 @@ class AuthController:
 
         elif reltype == 'hash:team': #One to Many
             index = 'irn:rel:hash:team:' + data['hash'] + ':*'
-            rel = data['team']
+            rel = data.get('team') or data.get('team_id')
 
 
         rel_document = {
@@ -1513,8 +1513,73 @@ class AuthController:
                 'status': 400,
             }
         return self._validate_invite_code(email.strip(), code.strip())
-    
 
+    def invalidate_pending_invites(self, email):
+        """
+        Delete all pending invite hashes for this email so old /invite links stop working.
+        Used before minting a fresh invite on resend.
+        """
+        email = (email or '').strip()
+        if not email:
+            return {'success': True, 'deleted': 0, 'message': 'No email'}
+
+        index = 'irn:rel:email:hash:ttl:*:*:*'
+        prefix = email + ':'
+        response = self.AUM.list_rel_prefix(index, prefix)
+        docs = response.get('document') or []
+        if isinstance(docs, dict):
+            docs = docs.get('items') or []
+
+        deleted = 0
+        for doc in docs:
+            rel = (doc.get('rel') or '').strip()
+            if not rel:
+                continue
+            parts = rel.split(':')
+            if len(parts) < 3:
+                continue
+            # rel format: email:hash:ttl (email has no colon)
+            rel_email, rel_hash, ttl = parts[0], parts[1], parts[2]
+            if len(parts) > 3:
+                rel_email = ':'.join(parts[:-2])
+                rel_hash = parts[-2]
+                ttl = parts[-1]
+
+            try:
+                team_rel = self.list_rel('hash:team', hash=rel_hash)
+                team_items = (team_rel.get('document') or {}).get('items') or []
+                for item in team_items:
+                    team_id = item.get('rel')
+                    if team_id:
+                        self.delete_rel('hash:team', hash=rel_hash, team_id=team_id)
+            except Exception as exc:
+                self.logger.debug(
+                    'invalidate_pending_invites: hash:team cleanup failed for %s: %s',
+                    rel_hash,
+                    exc,
+                )
+
+            try:
+                del_resp = self.delete_rel(
+                    'email:hash:ttl',
+                    email=rel_email,
+                    hash=rel_hash,
+                    ttl=ttl,
+                )
+                if del_resp.get('success'):
+                    deleted += 1
+            except Exception as exc:
+                self.logger.debug(
+                    'invalidate_pending_invites: email:hash:ttl cleanup failed for %s: %s',
+                    rel,
+                    exc,
+                )
+
+        return {
+            'success': True,
+            'deleted': deleted,
+            'message': f'Invalidated {deleted} pending invite(s)',
+        }
 
     # Function to generate TTL timestamp 24 hours from now
     def generate_ttl(self,offset_min=0):
