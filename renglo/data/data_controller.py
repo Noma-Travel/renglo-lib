@@ -931,10 +931,10 @@ class DataController:
 
             i += 1
 
-            if lastkey and i==1:
-                #If lastkey was sent, ignore first item
-                #as it was the last item in the last page
-                continue
+            # Do not skip the first item when lastkey is set. DynamoDB
+            # ExclusiveStartKey is already exclusive, so the first row of the
+            # next page is the first *new* document. Skipping it drops one
+            # document at every page boundary (e.g. a pending-approval trip).
 
             item = {}
             item = row['attributes']
