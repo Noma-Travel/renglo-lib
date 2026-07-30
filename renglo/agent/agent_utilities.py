@@ -20,6 +20,40 @@ import logging
 _logger_workspace = logging.getLogger("agent.workspace")
 _logger_llm = logging.getLogger("agent.llm")
 
+
+def _is_transient_llm_error(exc: BaseException) -> bool:
+    """True for transport/timeout failures worth retrying in llm().
+
+    Auth / bad-request / rate-limit are NOT retried — those need a different fix.
+    Falls back to message matching when wrappers (e.g. langfuse) re-raise a
+    generic Exception with "Connection error" text.
+    """
+    try:
+        import openai
+        if isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError)):
+            return True
+        if isinstance(
+            exc,
+            (
+                openai.AuthenticationError,
+                openai.BadRequestError,
+                openai.PermissionDeniedError,
+                openai.NotFoundError,
+                openai.RateLimitError,
+            ),
+        ):
+            return False
+    except Exception:
+        pass
+    msg = str(exc).lower()
+    return (
+        "connection error" in msg
+        or "timed out" in msg
+        or "timeout" in msg
+        or "temporarily unavailable" in msg
+    )
+
+
 class DecimalEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Decimal):
@@ -63,11 +97,12 @@ class AgentUtilities:
         # on the top-level response object).
         self.last_llm_usage = None
 
-        # OpenAI Client
+        # OpenAI Client — max_retries=0 so transport retries are owned by
+        # llm() (avoids stacking SDK retries on top of app-level backoff).
         try:
             openai_key = self.config.get('OPENAI_API_KEY', '')
-            self.AI_1 = OpenAI(api_key=openai_key)
-            self.AI_2 = OpenAI(api_key=openai_key)
+            self.AI_1 = OpenAI(api_key=openai_key, max_retries=0)
+            self.AI_2 = OpenAI(api_key=openai_key, max_retries=0)
         except Exception as e:
             _logger_llm.error("openai_init_failed | %s", e)
             self.AI_1 = None
@@ -788,74 +823,116 @@ class AgentUtilities:
         Returns:
             The LLM response or False if error
         """
+        # Create base parameters
+        params = {
+            'model': '',
+            'messages': '',
+            'temperature': 0.0
+        }
 
-        try:
-            # Create base parameters
-            params = {
-                'model': '',
-                'messages': '',
-                'temperature': 0.0
-            }
+        # Add optional parameters if they exist
+        if 'model' in prompt:
+            params['model'] = prompt['model']
+        if 'messages' in prompt:
+            params['messages'] = prompt['messages']
+        if 'temperature' in prompt:
+            params['temperature'] = prompt['temperature']
+        if 'tools' in prompt:
+            params['tools'] = prompt['tools']
+        if 'tool_choice' in prompt:
+            params['tool_choice'] = prompt['tool_choice']
+        if 'parallel_tool_calls' in prompt:
+            params['parallel_tool_calls'] = prompt['parallel_tool_calls']
+        if 'response_format' in prompt:
+            params['response_format'] = prompt['response_format']
 
-            # Add optional parameters if they exist
-            if 'model' in prompt:
-                params['model'] = prompt['model']
-            if 'messages' in prompt:
-                params['messages'] = prompt['messages']
-            if 'temperature' in prompt:
-                params['temperature'] = prompt['temperature']
-            if 'tools' in prompt:
-                params['tools'] = prompt['tools']
-            if 'tool_choice' in prompt:
-                params['tool_choice'] = prompt['tool_choice']
-            if 'parallel_tool_calls' in prompt:
-                params['parallel_tool_calls'] = prompt['parallel_tool_calls']
-            if 'response_format' in prompt:
-                params['response_format'] = prompt['response_format']
+        model = params['model']
+        messages = params['messages']
+        tools = params.get('tools')
+        _logger_llm.info(
+            "llm call model=%s messages=%d tools=%d",
+            model,
+            len(messages) if isinstance(messages, list) else 0,
+            len(tools or []),
+        )
+        djson("llm_last_prompt.json", {"model": model, "messages": messages, "tools": tools})
 
-            model = params['model']
-            messages = params['messages']
-            tools = params.get('tools')
-            _logger_llm.info("llm call model=%s messages=%d tools=%d", model, len(messages) if isinstance(messages, list) else 0, len(tools or []))
-            djson("llm_last_prompt.json", {"model": model, "messages": messages, "tools": tools})
-
-            # AI_1 is gpt-3.5-turbo which doesn't support structured outputs. AI_2 uses gpt-4o-mini which does.
-            # response = self.AI_1.chat.completions.create(**params)
-            response = self.AI_2.chat.completions.create(**params)
-
-            # Stash usage BEFORE unwrapping to .message — it only lives on the
-            # top-level response, and agent_react's per-turn token accounting
-            # (the "context meter" badge) reads it from here via
-            # AGU.last_llm_usage. Best-effort: a malformed/absent usage object
-            # must not fail a call that otherwise succeeded.
+        # App-level transport retries (SDK max_retries=0). Budget: 1 + 2 retries,
+        # backoff ~0.5s + ~1.5s ≈ 2s wait outside the calls themselves.
+        max_attempts = 3
+        backoffs = (0.5, 1.5)
+        t0 = time.monotonic()
+        last_err = None
+        for attempt in range(1, max_attempts + 1):
             try:
-                usage_obj = getattr(response, 'usage', None)
-                if usage_obj is not None:
-                    details = getattr(usage_obj, 'prompt_tokens_details', None)
-                    cached_tokens = getattr(details, 'cached_tokens', 0) if details is not None else 0
-                    self.last_llm_usage = {
-                        'prompt_tokens': getattr(usage_obj, 'prompt_tokens', 0) or 0,
-                        'completion_tokens': getattr(usage_obj, 'completion_tokens', 0) or 0,
-                        'total_tokens': getattr(usage_obj, 'total_tokens', 0) or 0,
-                        'cached_tokens': cached_tokens or 0,
-                    }
-                else:
+                # AI_1 is gpt-3.5-turbo which doesn't support structured outputs.
+                # AI_2 uses gpt-4o-mini which does.
+                response = self.AI_2.chat.completions.create(**params)
+
+                # Stash usage BEFORE unwrapping to .message — it only lives on the
+                # top-level response, and agent_react's per-turn token accounting
+                # (the "context meter" badge) reads it from here via
+                # AGU.last_llm_usage. Best-effort: a malformed/absent usage object
+                # must not fail a call that otherwise succeeded.
+                try:
+                    usage_obj = getattr(response, 'usage', None)
+                    if usage_obj is not None:
+                        details = getattr(usage_obj, 'prompt_tokens_details', None)
+                        cached_tokens = getattr(details, 'cached_tokens', 0) if details is not None else 0
+                        self.last_llm_usage = {
+                            'prompt_tokens': getattr(usage_obj, 'prompt_tokens', 0) or 0,
+                            'completion_tokens': getattr(usage_obj, 'completion_tokens', 0) or 0,
+                            'total_tokens': getattr(usage_obj, 'total_tokens', 0) or 0,
+                            'cached_tokens': cached_tokens or 0,
+                        }
+                    else:
+                        self.last_llm_usage = None
+                except Exception as usage_exc:
+                    _logger_llm.debug("llm usage capture failed | %s", usage_exc)
                     self.last_llm_usage = None
-            except Exception as usage_exc:
-                _logger_llm.debug("llm usage capture failed | %s", usage_exc)
+
+                resp = response.choices[0].message
+                _logger_llm.info(
+                    "llm result returned successfully and has_tool_calls=%s",
+                    bool(resp.tool_calls),
+                )
+                djson(
+                    "llm_last_response.json",
+                    {
+                        "role": resp.role,
+                        "content": resp.content,
+                        "tool_calls": [
+                            {"id": tc.id, "function": {"name": tc.function.name}}
+                            for tc in (resp.tool_calls or [])
+                        ],
+                    },
+                )
+                return resp
+
+            except Exception as e:
+                last_err = e
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                if attempt < max_attempts and _is_transient_llm_error(e):
+                    delay = backoffs[attempt - 1] if attempt - 1 < len(backoffs) else backoffs[-1]
+                    _logger_llm.warning(
+                        "llm retry | attempt=%s/%s | err=%s | elapsed_ms=%s | sleep_s=%s",
+                        attempt, max_attempts, e, elapsed_ms, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                _logger_llm.error(
+                    "llm error model=%s attempt=%s/%s elapsed_ms=%s %s",
+                    params.get('model', ''), attempt, max_attempts, elapsed_ms, e,
+                )
+                # Don't let a stale usage reading from a PREVIOUS successful call
+                # get attributed to this failed one.
                 self.last_llm_usage = None
+                return False
 
-            resp = response.choices[0].message
-            _logger_llm.info("llm result returned successfully and has_tool_calls=%s", bool(resp.tool_calls))
-            djson("llm_last_response.json", {"role": resp.role, "content": resp.content, "tool_calls": [{"id": tc.id, "function": {"name": tc.function.name}} for tc in (resp.tool_calls or [])]})
-            return resp
-
-        except Exception as e:
-            _logger_llm.error("llm error model=%s %s", params.get('model', ''), e)
-            # Don't let a stale usage reading from a PREVIOUS successful call
-            # get attributed to this failed one.
-            self.last_llm_usage = None
-            return False
+        # Unreachable, but keep the contract explicit.
+        _logger_llm.error("llm error model=%s %s", params.get('model', ''), last_err)
+        self.last_llm_usage = None
+        return False
 
     def llm_responses(self, input_items, tools, model=None):
         """
@@ -941,13 +1018,18 @@ class AgentUtilities:
             _logger_workspace.error("get_or_create_thread_failed | %s", e)
             return {'success': False,'action': action,'output': f"{e}"}
 
-    def new_chat_message_document(self, message, public_user=None, next=None):
+    def new_chat_message_document(
+        self, message, public_user=None, next=None, inbox_user_ids=None,
+    ):
         """
         Create a new chat message document.
 
         Args:
             message (str): The message content
-            public_user (str): The public user identifier
+            public_user (str): Canonical public user (md5) — authz/owner identity
+            inbox_user_ids (list, optional): Extra FE-aligned ids to try when
+                enriching the conversation-list row under ``{org}-u:{user}``.
+                Does not change ``public_user`` for anything else.
 
         Returns:
             dict: Success status and response
@@ -1019,27 +1101,40 @@ class AgentUtilities:
             # user container {org}-u:{user}, not the conv-key where turns live)
             # from this user message. Title is fill-if-empty so a later trip
             # title is never overwritten; last_message always refreshes.
-            if public_user and self.thread:
+            # FE may have created the row under custom:public_user / raw sub
+            # while public_user here is md5(sub,9) — try inbox_user_ids too.
+            candidates = []
+            for raw in list(inbox_user_ids or []) + [public_user]:
+                uid = str(raw or "").strip()
+                if uid and uid not in candidates:
+                    candidates.append(uid)
+            if candidates and self.thread:
                 try:
                     preview = " ".join(str(message or "").split()).strip()
                     if preview:
                         if len(preview) > 80:
                             preview = preview[:77] + "..."
-                        container = f"{self.org}-u:{public_user}"
-                        meta = self.CHC.update_thread_meta(
+                        meta = self.CHC.enrich_user_thread_meta(
                             self.portfolio,
                             self.org,
                             self.entity_type,
-                            container,
                             self.thread,
+                            candidates,
                             fill_if_empty={"title": preview},
                             last_message=preview,
                             last_message_at=str(datetime.now().timestamp()),
                         )
                         if not (meta or {}).get("success"):
-                            _logger_workspace.warning(
-                                "thread_meta_enrich_miss | container=%s thread=%s meta=%s",
-                                container,
+                            # No inbox row under any candidate — common for
+                            # orphan thread ids; keep WARNING for other errors.
+                            msg = (meta or {}).get("message") or ""
+                            log = (
+                                _logger_workspace.debug
+                                if msg == "Thread not found"
+                                else _logger_workspace.warning
+                            )
+                            log(
+                                "thread_meta_enrich_miss | thread=%s meta=%s",
                                 self.thread,
                                 meta,
                             )
