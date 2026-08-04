@@ -5,6 +5,7 @@ import boto3
 import copy
 import json
 import logging
+import os
 from datetime import datetime
 from ..common import *
 import uuid
@@ -350,17 +351,55 @@ class AuthController:
             
 
 
-    def is_global_admin(self, cognito_groups=None, user_id=None):
-        """Platform admin: Cognito group global_admin or user entity slot_d."""
+    def _system_admin_emails(self):
+        """Noma SYSTEM_ADMIN_EMAILS (comma-separated) — treated as platform global admins."""
+        raw = (self.config or {}).get('SYSTEM_ADMIN_EMAILS') or ''
+        if not raw and isinstance(os.environ.get('SYSTEM_ADMIN_EMAILS'), str):
+            raw = os.environ.get('SYSTEM_ADMIN_EMAILS') or ''
+        return {
+            part.strip().lower()
+            for part in str(raw).split(',')
+            if part and str(part).strip()
+        }
+
+    def _system_admin_user_ids(self):
+        raw = (self.config or {}).get('SYSTEM_ADMIN_USER_IDS') or ''
+        if not raw and isinstance(os.environ.get('SYSTEM_ADMIN_USER_IDS'), str):
+            raw = os.environ.get('SYSTEM_ADMIN_USER_IDS') or ''
+        return {
+            part.strip().lower()
+            for part in str(raw).split(',')
+            if part and str(part).strip()
+        }
+
+    def is_global_admin(self, cognito_groups=None, user_id=None, email=None):
+        """Platform admin: Cognito global_admin, user slot_d, or Noma system_admin list.
+
+        Noma system_admin and Renglo global_admin are the same privilege level:
+        full tenant tree and Console/platform access.
+        """
         if cognito_groups:
             groups = cognito_groups if isinstance(cognito_groups, list) else [cognito_groups]
             if 'global_admin' in groups:
                 return True
+
+        admin_ids = self._system_admin_user_ids()
+        if user_id and str(user_id).strip().lower() in admin_ids:
+            return True
+
+        admin_emails = self._system_admin_emails()
+        email_norm = (email or '').strip().lower()
+        if email_norm and email_norm in admin_emails:
+            return True
+
         if user_id:
             user_entity = self.get_entity('user', user_id=user_id)
             if user_entity.get('success'):
                 doc = user_entity.get('document') or {}
                 if doc.get('slot_d') == 'global_admin':
+                    return True
+                entity_email = (doc.get('email') or '').strip().lower()
+                if entity_email and entity_email in admin_emails:
                     return True
         return False
 
