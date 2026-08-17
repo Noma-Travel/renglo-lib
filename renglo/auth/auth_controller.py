@@ -5,6 +5,7 @@ import boto3
 import copy
 import json
 import logging
+import os
 from datetime import datetime
 from ..common import *
 import uuid
@@ -350,17 +351,55 @@ class AuthController:
             
 
 
-    def is_global_admin(self, cognito_groups=None, user_id=None):
-        """Platform admin: Cognito group global_admin or user entity slot_d."""
+    def _system_admin_emails(self):
+        """Noma SYSTEM_ADMIN_EMAILS (comma-separated) — treated as platform global admins."""
+        raw = (self.config or {}).get('SYSTEM_ADMIN_EMAILS') or ''
+        if not raw and isinstance(os.environ.get('SYSTEM_ADMIN_EMAILS'), str):
+            raw = os.environ.get('SYSTEM_ADMIN_EMAILS') or ''
+        return {
+            part.strip().lower()
+            for part in str(raw).split(',')
+            if part and str(part).strip()
+        }
+
+    def _system_admin_user_ids(self):
+        raw = (self.config or {}).get('SYSTEM_ADMIN_USER_IDS') or ''
+        if not raw and isinstance(os.environ.get('SYSTEM_ADMIN_USER_IDS'), str):
+            raw = os.environ.get('SYSTEM_ADMIN_USER_IDS') or ''
+        return {
+            part.strip().lower()
+            for part in str(raw).split(',')
+            if part and str(part).strip()
+        }
+
+    def is_global_admin(self, cognito_groups=None, user_id=None, email=None):
+        """Platform admin: Cognito global_admin, user slot_d, or Noma system_admin list.
+
+        Noma system_admin and Renglo global_admin are the same privilege level:
+        full tenant tree and Console/platform access.
+        """
         if cognito_groups:
             groups = cognito_groups if isinstance(cognito_groups, list) else [cognito_groups]
             if 'global_admin' in groups:
                 return True
+
+        admin_ids = self._system_admin_user_ids()
+        if user_id and str(user_id).strip().lower() in admin_ids:
+            return True
+
+        admin_emails = self._system_admin_emails()
+        email_norm = (email or '').strip().lower()
+        if email_norm and email_norm in admin_emails:
+            return True
+
         if user_id:
             user_entity = self.get_entity('user', user_id=user_id)
             if user_entity.get('success'):
                 doc = user_entity.get('document') or {}
                 if doc.get('slot_d') == 'global_admin':
+                    return True
+                entity_email = (doc.get('email') or '').strip().lower()
+                if entity_email and entity_email in admin_emails:
                     return True
         return False
 
@@ -1149,7 +1188,7 @@ class AuthController:
 
         elif reltype == 'hash:team': #One to Many
             index = 'irn:rel:hash:team:' + data['hash'] + ':*'
-            rel = data['team']
+            rel = data.get('team') or data.get('team_id')
 
 
         rel_document = {
@@ -1513,8 +1552,73 @@ class AuthController:
                 'status': 400,
             }
         return self._validate_invite_code(email.strip(), code.strip())
-    
 
+    def invalidate_pending_invites(self, email):
+        """
+        Delete all pending invite hashes for this email so old /invite links stop working.
+        Used before minting a fresh invite on resend.
+        """
+        email = (email or '').strip()
+        if not email:
+            return {'success': True, 'deleted': 0, 'message': 'No email'}
+
+        index = 'irn:rel:email:hash:ttl:*:*:*'
+        prefix = email + ':'
+        response = self.AUM.list_rel_prefix(index, prefix)
+        docs = response.get('document') or []
+        if isinstance(docs, dict):
+            docs = docs.get('items') or []
+
+        deleted = 0
+        for doc in docs:
+            rel = (doc.get('rel') or '').strip()
+            if not rel:
+                continue
+            parts = rel.split(':')
+            if len(parts) < 3:
+                continue
+            # rel format: email:hash:ttl (email has no colon)
+            rel_email, rel_hash, ttl = parts[0], parts[1], parts[2]
+            if len(parts) > 3:
+                rel_email = ':'.join(parts[:-2])
+                rel_hash = parts[-2]
+                ttl = parts[-1]
+
+            try:
+                team_rel = self.list_rel('hash:team', hash=rel_hash)
+                team_items = (team_rel.get('document') or {}).get('items') or []
+                for item in team_items:
+                    team_id = item.get('rel')
+                    if team_id:
+                        self.delete_rel('hash:team', hash=rel_hash, team_id=team_id)
+            except Exception as exc:
+                self.logger.debug(
+                    'invalidate_pending_invites: hash:team cleanup failed for %s: %s',
+                    rel_hash,
+                    exc,
+                )
+
+            try:
+                del_resp = self.delete_rel(
+                    'email:hash:ttl',
+                    email=rel_email,
+                    hash=rel_hash,
+                    ttl=ttl,
+                )
+                if del_resp.get('success'):
+                    deleted += 1
+            except Exception as exc:
+                self.logger.debug(
+                    'invalidate_pending_invites: email:hash:ttl cleanup failed for %s: %s',
+                    rel,
+                    exc,
+                )
+
+        return {
+            'success': True,
+            'deleted': deleted,
+            'message': f'Invalidated {deleted} pending invite(s)',
+        }
 
     # Function to generate TTL timestamp 24 hours from now
     def generate_ttl(self,offset_min=0):
