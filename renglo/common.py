@@ -139,6 +139,7 @@ def load_config():
         # Timeout sweep thresholds, in hours (per case state).
         'FLIGHT_CHANGE_TIMEOUT_AWAITING_PROVIDER',
         'FLIGHT_CHANGE_TIMEOUT_AWAITING_PROVIDER_REISSUE',
+        'FLIGHT_CHANGE_NOTIFY_REDIRECT', 'FLIGHT_CHANGE_NOTIFY_USER_EMAIL',
         # WhatsApp (Meta Cloud API / Twilio)
         'WHATSAPP_WEBHOOK_SECRET',
         'WA_PROVIDER', 'WA_ACCESS_TOKEN', 'WA_PHONE_NUMBER_ID', 'WA_PHONE_NUMBER',
