@@ -204,22 +204,59 @@ class DataController:
 
         return result, 201
 
+
+    def invalidate_s3_cache(self,portfolio, org, ring, sort=None):
+        '''
+        Drops the ring snapshot instead of rebuilding it.
+
+        refresh_s3_cache() is O(ring size): it pages the whole ring out of
+        DynamoDB (up to 50 x 249 documents), serializes it and re-uploads it.
+        Paying that on every write makes writes scale with tenant size. Deleting
+        the key is O(1) and the read path already knows how to recover: a GET
+        without pagination does head_object, misses, and regenerates the
+        snapshot from DynamoDB (see data_routes.route_a_b_get).
+
+        The `sort` argument is accepted and ignored so callers can swap
+        refresh_s3_cache -> invalidate_s3_cache without changing their args.
+
+        Never raises: a failed invalidation must not fail the write that
+        triggered it. It is logged as an error because the stale snapshot will
+        keep being served until the next successful write or refresh.
+        '''
+
+        bucket_name = self.config.get('S3_BUCKET_NAME')
+        if not bucket_name:
+            self.logger.error('S3_BUCKET_NAME not found in config; cannot invalidate cache')
+            return False
+
+        file_path = f'data/{portfolio}/{org}/{ring}'
+
+        try:
+            # S3 DeleteObject is idempotent: a missing key is still a success.
+            boto3.client('s3').delete_object(Bucket=bucket_name, Key=file_path)
+            self.logger.debug(f'Invalidated s3 cache: {file_path}')
+            return True
+        except Exception as e:
+            self.logger.error(f'Failed to invalidate s3 cache {file_path}: {e}')
+            return False
+
     def sanitize(self,obj):
         '''
-        Avoids Floats being sent to DynamoDB
+        Avoids Floats being sent to DynamoDB (boto3 requires Decimal).
         '''
         if isinstance(obj, list):
             return [self.sanitize(x) for x in obj]
         elif isinstance(obj, dict):
             return {k: self.sanitize(v) for k, v in obj.items()}
-        elif isinstance(obj, Decimal):
-            # Convert Decimal to int if it's a whole number, otherwise float
-            return int(obj) if obj % 1 == 0 else float(obj)
+        elif isinstance(obj, bool):
+            # bool is a subclass of int; keep as native DynamoDB BOOL
+            return obj
         elif isinstance(obj, float):
-            # Convert float to string
-            return str(obj)
+            # Use str() to avoid binary float precision artifacts
+            return Decimal(str(obj))
+        elif isinstance(obj, Decimal):
+            return obj
         elif isinstance(obj, int):
-            # Keep integers as is
             return obj
         else:
             return obj

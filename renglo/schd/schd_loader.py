@@ -8,10 +8,38 @@ import traceback
 
 _logger_schd = logging.getLogger("agent.schd")
 
+
+def _unload_handlers_enabled():
+    """
+    Whether load_and_run should drop the handler module from sys.modules after
+    running it.
+
+    Unloading forces a full re-import of the handler (and its dependency tree) on
+    the next call, plus a stop-the-world gc.collect(). On a warm Lambda container
+    that throws away exactly the work the container exists to amortize: a chat
+    turn re-imports agent_react and everything it pulls in, every time.
+
+    Resolution order:
+      1. SCHD_UNLOAD_HANDLERS env var, when set ('off'/'0'/'false'/'no' disable it)
+      2. on by default inside Lambda (AWS_LAMBDA_FUNCTION_NAME present)
+      3. off by default everywhere else
+
+    Set SCHD_UNLOAD_HANDLERS=off in the Lambda environment to keep modules warm;
+    that is a config toggle, so reverting needs no redeploy of this library.
+    """
+    override = os.getenv('SCHD_UNLOAD_HANDLERS')
+    if override is not None:
+        return override.strip().lower() not in ('off', '0', 'false', 'no')
+    return bool(os.getenv('AWS_LAMBDA_FUNCTION_NAME'))
+
+
 class SchdLoader:
 
     def __init__(self, module_path="handlers"):
         self.module_path = module_path
+        # Read per-instance (not at import time) so tests and callers can flip
+        # the env var and build a new loader to pick it up.
+        self.unload_handlers = _unload_handlers_enabled()
 
 
 
@@ -202,7 +230,7 @@ class SchdLoader:
                     return {'success':False,'action':func_name,'error':error,'status':500}
 
 
-            if runtime_loaded_class:
+            if runtime_loaded_class and self.unload_handlers:
                 # Unload module to free memory / pick up source edits on next call
                 del instance
                 for key in (imported_module_name, actual_module_name, module_name):
