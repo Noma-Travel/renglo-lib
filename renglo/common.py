@@ -141,6 +141,9 @@ def load_config():
         'FLIGHT_CHANGE_TIMEOUT_AWAITING_PROVIDER_REISSUE',
         'FLIGHT_CHANGE_NOTIFY_REDIRECT', 'FLIGHT_CHANGE_NOTIFY_USER_EMAIL',
         'FLIGHT_CHANGE_MODEL',
+        # Deep-link base for the notification e-mails; falls back to FE_BASE_URL /
+        # APP_FE_BASE_URL when unset (see flight_change_react._fe_base_url).
+        'FLIGHT_CHANGE_FE_BASE_URL',
         # WhatsApp (Meta Cloud API / Twilio)
         'WHATSAPP_WEBHOOK_SECRET',
         'WA_PROVIDER', 'WA_ACCESS_TOKEN', 'WA_PHONE_NUMBER_ID', 'WA_PHONE_NUMBER',
