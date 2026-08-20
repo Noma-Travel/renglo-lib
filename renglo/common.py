@@ -131,6 +131,19 @@ def load_config():
         'SLACK_API_ERRORS_WEBHOOK_URL', 'SLACK_BOOKINGS_WEBHOOK_URL', 'SLACK_ACTIVE_TRAVELS_WEBHOOK_URL',
         'CVC_BASE_URL', 'CVC_CLIENT_ID', 'CVC_CLIENT_SECRET', 'CVC_USERNAME', 'CVC_PASSWORD',
         'ASAAS_API_KEY', 'ASAAS_BASE_URL',
+        # Flight-change negotiation agent (flight_change_react / flight_change_inbound)
+        'FLIGHT_CHANGE_PROVIDER_EMAIL', 'FLIGHT_CHANGE_EMAIL_OBSERVER',
+        'FLIGHT_CHANGE_EMAIL_FROM', 'FLIGHT_CHANGE_INBOUND_DOMAIN',
+        'FLIGHT_CHANGE_EMAIL_DRY_RUN', 'RESEND_WEBHOOK_SECRET',
+        'FLIGHT_CHANGE_ALLOW_UNSIGNED_WEBHOOK',
+        # Timeout sweep thresholds, in hours (per case state).
+        'FLIGHT_CHANGE_TIMEOUT_AWAITING_PROVIDER',
+        'FLIGHT_CHANGE_TIMEOUT_AWAITING_PROVIDER_REISSUE',
+        'FLIGHT_CHANGE_NOTIFY_REDIRECT', 'FLIGHT_CHANGE_NOTIFY_USER_EMAIL',
+        'FLIGHT_CHANGE_MODEL',
+        # Deep-link base for the notification e-mails; falls back to FE_BASE_URL /
+        # APP_FE_BASE_URL when unset (see flight_change_react._fe_base_url).
+        'FLIGHT_CHANGE_FE_BASE_URL',
         # WhatsApp (Meta Cloud API / Twilio)
         'WHATSAPP_WEBHOOK_SECRET',
         'WA_PROVIDER', 'WA_ACCESS_TOKEN', 'WA_PHONE_NUMBER_ID', 'WA_PHONE_NUMBER',
