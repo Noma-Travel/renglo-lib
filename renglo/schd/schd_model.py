@@ -69,7 +69,7 @@ class SchdModel:
                     Targets=[
                         {
                             'Id': rule_name+'_target',
-                            'Arn':  self.config.get('API_GATEWAY_ARN', '')+'/'+self.config.get('SYS_ENV', '')+'/POST/_schd/ping', # ARN of the API Gateway
+                            'Arn':  self.config.get('API_GATEWAY_ARN', '')+'/'+self.config.get('SYS_ENV', '')+'/POST/v1/cron/ping', # ARN of the API Gateway
                             'RoleArn': self.config.get('ROLE_ARN', ''),  # IAM role to allow EventBridge to invoke HTTPS
                             'Input': json.dumps(payload),
                             'HttpParameters': {
